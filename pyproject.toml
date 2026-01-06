@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "magix"
+name = "tracept"
 version = "0.0.1"
 
 # dynamic = ["version"]
@@ -28,4 +28,4 @@ authors = [
 description = "JIT-compile-time utilities for cleaner JAX code, with extra utilities for dynamic systems."
 
 [project.urls]
-Homepage = "https://github.com/tscott-00/magix"
+Homepage = "https://github.com/tscott-00/tracept"
