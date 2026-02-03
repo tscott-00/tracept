@@ -10,11 +10,10 @@ import jax
 import jax.numpy as jnp
 import jax.typing as jtp
 
-import magix
-from magix import magiclass, Placeholder
+from tracept import tclass, tmethod, Placeholder
 
 # Time varing curves expressed as a linear combination of bases weighted by coeffs that may vary across MC samples
-@magiclass#(jit_statics=['bases'])
+@tclass#(jit_statics=['bases'])
 class LerpBases:
     x: jtp.ArrayLike # jax.scipy.interpolate.RegularGridInterpolator
     f: jtp.ArrayLike
@@ -36,7 +35,7 @@ class LerpBases:
         # bases = jax.scipy.interpolate.RegularGridInterpolator(x, y, method='linear')
         return cls(x, f, left, right, jnp.ones(f.size//x.size))
     
-    @magixmethod
+    @tmethod
     def __call__(self, xs):
         # Slop-free version of jnp.interp (edge cases are disallowed in constructor instead of handled in runtime)
         i = jnp.clip(jnp.searchsorted(self.x, xs, side='right'), 1, len(self.x) - 1)
@@ -52,7 +51,7 @@ class LerpBases:
 @dataclass
 class LabelWrapper:
     array: jtp.ArrayLike
-    inv_labels: list[str]
+    inv_labels: dict[str,str]
     
     def __getitem__(self, label):
         return self.array[self.inv_labels[label]]
@@ -61,7 +60,7 @@ class LabelWrapper:
         return self.array[self.inv_labels[label]]
 
 # TODO: could generalize via recursive function (no overhead once compiled)
-@magiclass(jit_statics=['inv_labels'])
+@tclass(jit_statics=['inv_labels'])
 class BilerpBases:
     x: jtp.ArrayLike # (Nx)
     y: jtp.ArrayLike # (Ny)
@@ -80,7 +79,7 @@ class BilerpBases:
         return cls(x, y, f, inv_labels)
     
     # TODO: allow stuff like bases(0.5)['mach'] and bases(0.5).mach?
-    @magixmethod
+    @tmethod
     def __call__(self, xs, ys):
         # Direct extension of 1D version
         i, j = [jnp.clip(jnp.searchsorted(_x, _xs, side='right'), 1, len(_x)-1) for _x, _xs in [(self.x, xs), (self.y, ys)]]
@@ -91,8 +90,8 @@ class BilerpBases:
         else:
             return LabelWrapper(fs, self.inv_labels)
 
-# Convenience class for time varing curves the user wishes to specify as constant due to lazyness (i.e. motor mass, Cg, etc.)
-@magiclass
+# Convenience class for time varing curves the user wishes to specify as constant due to lazyness
+@tclass
 class DummyBases:
     f: jtp.ArrayLike
     
@@ -104,6 +103,6 @@ class DummyBases:
             offsets = jnp.zeros(f.shape)
         return cls(f, offsets)
     
-    @magixmethod
+    @tmethod
     def __call__(self, xs):
         return self.f

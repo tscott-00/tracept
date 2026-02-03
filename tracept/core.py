@@ -5,17 +5,21 @@ from functools import partial, reduce
 from dataclasses import dataclass, field, is_dataclass, make_dataclass
 from dataclasses import fields as get_fields
 
-import scipy
 import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.typing as jtp
 
-# Magix classes should be initialized by user with Class.new(), which is auto-generated if not user-specified
-# This is because JAX jit compiled dataclasses are internally copied by calling the constructor with all fields, preventing custom initializers
-# Only variables explicitly specified in jit_statics are guaranteed to trigger recompilation
-def magiclass(cls=None, *, jit_statics=[]):
-    def _magiclass(cls):
+def tclass(cls=None, *, static_attrnames=[]):
+    """Decorator to create a Tracept class, enabling functionality mutable JIT OOP.
+    All attributes of the class must be annotated in dataclass convention.
+    Tracept classes should be initialized by user with MyTClass.new(), which is auto-generated if not user-specified.
+    This is because JAX JIT compiled dataclasses are internally copied by calling the constructor with all fields, preventing custom initializers.
+
+    Args:
+        static_attrnames: names of attributes to make static, only these attributes are guaranteed to trigger recompilation
+    """
+    def _tclass(cls):
         if not hasattr(cls, 'new'):
             setattr(cls, 'new', classmethod(lambda cls, *vargs, **kwargs: cls(*vargs, **kwargs)))
         jit_variables = []
@@ -23,20 +27,20 @@ def magiclass(cls=None, *, jit_statics=[]):
         fields = get_fields(cls) # Get fields (everything that was annotated)
         # TODO: Error if not annotated
         for field in fields:
-            if not field.name in jit_statics:
+            if not field.name in static_attrnames:
                 jit_variables.append(field.name)
-        # print(cls, jit_variables, jit_statics)
-        jax.tree_util.register_dataclass(cls, data_fields=jit_variables, meta_fields=jit_statics)
+        # print(cls, jit_variables, static_attrnames)
+        jax.tree_util.register_dataclass(cls, data_fields=jit_variables, meta_fields=static_attrnames)
         return cls
     
     # Handle args vs no args provided flexibility
     if cls is None:
-        return _magiclass
-    return _magiclass(cls)
+        return _tclass
+    return _tclass(cls)
 
 # Class that indicates an incorrect configuration if not changed
 class Placeholder:
-    def __init__(self, error_message='Placeholder not set, make sure a dsp_class is constructed via MyClass.new() instead of MyClass()'):
+    def __init__(self, error_message='Placeholder not set, make sure a tclass is constructed via MyTClass.new() instead of MyTClass()'):
         self.error_message = error_message
 
 # Indicates a field will be part of the dynamic shape, user provides shape of data (at a given time for a single MC sample)
@@ -73,7 +77,7 @@ class DynamicsMap:
     def __init__(self, I):
         self.I = I
 
-class MagixWrapper:
+class TWrapper:
     class Iterable:
         class Iterator:
             def __init__(self, z_node_wrapper, z_node_iter):
@@ -92,11 +96,11 @@ class MagixWrapper:
         def wrap(self, value):
             # TODO: if support dynamic in init, support DynamicsMap here...
             if is_dataclass(type(value)):
-                return MagixWrapper(self.z_box, value, is_root=False, i_pre=self.i_pre)
+                return TWrapper(self.z_box, value, is_root=False, i_pre=self.i_pre)
             elif callable(value):
                 raise ValueError('Collections of functions not supported, may later support static functions')
             elif type(value) in [list, tuple, dict]:
-                return MagixWrapper.Iterable(self.z_box, value, self.i_pre)
+                return TWrapper.Iterable(self.z_box, value, self.i_pre)
             else:
                 return value
         
@@ -126,7 +130,7 @@ class MagixWrapper:
             if type(value) is DynamicsMap:
                 return self.z_box.getz(value.I, i_pre=(self.i1_pre-1,))*(1-self.l_pre) + self.z_box.getz(value.I, i_pre=(self.i1_pre,))*self.l_pre
             elif is_dataclass(type(value)):
-                return MagixWrapper.LerpWrapper(self.z_box, value, self.i1_pre, self.l_pre)
+                return TWrapper.LerpWrapper(self.z_box, value, self.i1_pre, self.l_pre)
             elif type(value) in [list, tuple, dict]:
                 raise ValueError('Upcoming feature') # TODO: need another? or just test in wrap?
             else:
@@ -188,7 +192,7 @@ class MagixWrapper:
         self.__dict__['i_pre'] = i_pre
     
     def __call__(self, *v, **k):
-        return self.z_node(*v, magix_self=self, **k)
+        return self.z_node(*v, tracept_self=self, **k)
 
     def __getattr__(self, name):
         # value = self.z_node.__dict__[name]
@@ -197,9 +201,9 @@ class MagixWrapper:
             # TODO: to support in place slice assignments, have to wrap in something new
             return self.z_box.getz(value.I, i_pre=self.i_pre) # self.z_box.z_dyn[self.i_t,...,value.I]
         elif is_dataclass(type(value)):
-            return MagixWrapper(self.z_box, value, is_root=False, i_pre=self.i_pre)
+            return TWrapper(self.z_box, value, is_root=False, i_pre=self.i_pre)
         elif callable(value):
-            return partial(value, magix_self=self)
+            return partial(value, tracept_self=self)
         elif type(value) in [list, tuple, dict]:
             return self.Iterable(self.z_box, value, self.i_pre)
         else:
@@ -214,12 +218,12 @@ class MagixWrapper:
             raise ValueError('{} isn\'t mutable; all mutable states must be stored as a DynamicsMap'.format(name))
 
     def __getitem__(self, i_pre):
-        return MagixWrapper(self.z_box, self.z_node, is_root=False, i_pre=i_pre)
+        return TWrapper(self.z_box, self.z_node, is_root=False, i_pre=i_pre)
 
     def lerp(self, ts: float, t: jtp.ArrayLike):
         i1 = jnp.clip(jnp.searchsorted(t, ts, side='right'), 1, len(t) - 1)
         l  = jnp.clip((ts - t[i1-1])/(t[i1] - t[i1-1]), 0.0, 1.0)
-        return MagixWrapper.LerpWrapper(self.z_box, self.z_node, i1, l)
+        return TWrapper.LerpWrapper(self.z_box, self.z_node, i1, l)
 
     # TODO: repr for tree structure only, dynamic only, and static only, no children ie ...
     def __repr__(self):
@@ -230,57 +234,57 @@ class MagixWrapper:
             if type(value) is DynamicsMap:
                 fields_repr += '{}: {}, '.format(field.name, np.array2string(self.z_box.getz(value.I, i_pre=self.i_pre), max_line_width=1000))
             elif is_dataclass(type(value)):
-                fields_repr += '{}( {} ), '.format(field.name, MagixWrapper(self.z_box, value, is_root=False, i_pre=self.i_pre))
+                fields_repr += '{}( {} ), '.format(field.name, TWrapper(self.z_box, value, is_root=False, i_pre=self.i_pre))
             else:
                 fields_repr += '{}: {}, '.format(field.name, value)
         return fields_repr
 
-# Magical function decorator
+# Tracept function decorator
 # Static functions can be called from anywhere and take and return only z
-# Member functions are only called from magix static functions and can take and return anything
-def magixmethod(func):
+# Member functions are only called from tracept static functions and can take and return anything
+def tmethod(func):
     # @functools.wraps(func) # TODO: retain signature
     # Users should call with z, internal state managers like integrators should call with z_dyn and z
-    def with_magix(*vargs, **kwargs):
-        options = dict( # Default magix options
+    def with_tracept(*vargs, **kwargs):
+        options = dict( # Default tracept options
             z_out = True,
             # TODO: static z option
             # TODO: specific locked attribs (no read or write)
             # TODO: way to do separate containers for a set of active variables? could speed up things like pont solver a lot
         )
-        if 'magix_options' in kwargs:
-            for k, v in kwargs['magix_options'].items():
+        if 'tracept_options' in kwargs:
+            for k, v in kwargs['tracept_options'].items():
                 options[k] = v
-            del kwargs['magix_options']
+            del kwargs['tracept_options']
 
         # TODO: actually detect self via inspect
         if len(vargs) > 0:
-            if not 'magix_self' in kwargs:
+            if not 'tracept_self' in kwargs:
                 # TODO: could maybe allow if it returns z and can figure out where it is inside z...
-                raise ValueError('Magix member functions must be called from within a magix static function as part of wrapped z')
+                raise ValueError('Tracept member functions must be called from within a Tracept static function as part of wrapped z')
             # TODO: allow any return?
             # if 'z' in kwargs:
-                # return func(kwargs['magix_self'], *vargs[1:], z=kwargs['z'])
+                # return func(kwargs['tracept_self'], *vargs[1:], z=kwargs['z'])
             # else:
-                # return func(kwargs['magix_self'], *vargs[1:])
-            filtered_kwargs = {k: v for k,v in kwargs.items() if k != 'magix_self'}
+                # return func(kwargs['tracept_self'], *vargs[1:])
+            filtered_kwargs = {k: v for k,v in kwargs.items() if k != 'tracept_self'}
             # print([type(v) for v in vargs])
-            return func(kwargs['magix_self'], *vargs[1:], **filtered_kwargs)
+            return func(kwargs['tracept_self'], *vargs[1:], **filtered_kwargs)
         else:
             if 'z_tree' in kwargs:
-                result = func(z=MagixWrapper(kwargs['z_dyn'], kwargs['z_tree'], is_root=True))
+                result = func(z=TWrapper(kwargs['z_dyn'], kwargs['z_tree'], is_root=True))
                 # TODO: allow other return values along with z?
                 if options['z_out']:
                     result = result.z_box.z_dyn
             elif 'z' in kwargs:
-                # If given a MagixWrapper, know this is magiception and don't intervene
+                # If given a TWrapper, know this is Traception and don't intervene
                 # TODO: allow generic return if nested static? take root flag for clarity?
                 result = func(z=kwargs['z'])
             else:
-                raise ValueError('Magix methods must be called with either wrapped z kwarg or both z_tree and z_dyn kwargs')
+                raise ValueError('Tracept methods must be called with either wrapped z kwarg or both z_tree and z_dyn kwargs')
             return result
     
-    return with_magix
+    return with_tracept
 
 def bake_list(z_list, z_ptr, dmap_z_I, dmap_dz_I, labels_I):
     for z_item in z_list:
@@ -369,11 +373,11 @@ def bake_tree(z_tree):
 
     return { 'z_tree': z_tree, 'N_dyn': z_ptr, 'dmap_z_I': dmap_z_I, 'dmap_dz_I': dmap_dz_I, 'labels_I': labels_I }
 
-# Preprocess component classes into an aggregate z usable in magix functions, create shared dynamic array while filling z with its index maps, and resolve derivative relationships
+# Preprocess component classes into an aggregate z usable in Tracept functions, create shared dynamic array while filling z with its index maps, and resolve derivative relationships
 def bake_trees(**z_branches):
-    return bake_tree(magiclass(make_dataclass('_GeneratedZ', [subclass_name for subclass_name in z_branches]))(**z_branches))
+    return bake_tree(tclass(make_dataclass('_GeneratedZ', [subclass_name for subclass_name in z_branches]))(**z_branches))
 
 def zeros(z_meta, shape=()):
     if type(shape) is int:
         shape = (shape,)
-    return MagixWrapper(jnp.zeros(shape+(z_meta['N_dyn'],)), z_meta['z_tree'], is_root=True)
+    return TWrapper(jnp.zeros(shape+(z_meta['N_dyn'],)), z_meta['z_tree'], is_root=True)

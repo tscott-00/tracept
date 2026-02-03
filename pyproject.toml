@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tracept"
-version = "0.0.1"
+version = "0.0.2"
 
 # dynamic = ["version"]
 dependencies = [
@@ -16,7 +16,6 @@ dependencies = [
     #"matplotlib",
     #"cmasher",
     #"mathutils",
-    #"bpy",
 ]
 
 requires-python = ">= 3.10"
