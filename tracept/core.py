@@ -175,14 +175,22 @@ class TWrapper:
             if i_pre == None:
                 return self.z_dyn[..., I]
             else:
-                return self.z_dyn[i_pre+(..., I)].T # TODO: better way of dealing with weird transposing np does?
+                Dz = len(self.z_dyn.shape)
+                if len(i_pre) < Dz:
+                    return self.z_dyn[i_pre+(..., I)].T # TODO: better way of dealing with weird transposing np does?
+                else:
+                    return self.z_dyn[i_pre[:Dz-1]+(I[i_pre[Dz-1:]],)]
                 # return self.z_dyn[i_pre+(:,I,)]
         
         def setz(self, I, value, i_pre: tuple = None):
             if i_pre == None:
                 self.z_dyn = self.z_dyn.at[..., I].set(value)
             else:
-                self.z_dyn = self.z_dyn.at[i_pre+(..., I)].set(value)
+                Dz = len(self.z_dyn.shape)
+                if len(i_pre) < Dz:
+                    self.z_dyn = self.z_dyn.at[i_pre+(..., I)].set(value)
+                else:
+                    self.z_dyn = self.z_dyn.at[i_pre[:Dz-1]+(I[i_pre[Dz-1:]],)].set(value)
     
     def __init__(self, z_dyn, z_node, is_root, i_pre=None):
         # Use __dict__ when initializing to avoid __setattr__

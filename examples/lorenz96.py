@@ -20,19 +20,22 @@ import tracept.odes
 
 @tclass
 class Lorenz96:
-    """Lorenz96 dynamics for a user-specified dimensionality"""
-
     x:  jax.Array = Placeholder()
     dx: jax.Array = Derivative('x')
 
     @classmethod
     def new(cls, dims):
-        return cls(x=Dynamic(dims))
+        """Lorenz96 dynamics for a user-specified dimensionality."""
+
+        return cls(x=Dynamic(shape=dims))
 
     @tmethod
     def __call__(self):
-        """Update derivatives using internal state"""
-        # dx_i/dt = (x_{i+1} - x_{i-2}})x_{i-1} + 8, with indices wrapping around when under or overflowing
+        """Update derivatives using internal state.
+
+        $\\frac{dx_i}{dt} = (x_{i+1} - x_{i-2}})x_{i-1} + 8$, with indices wrapping around when under or overflowing
+        """
+
         self.dx = (jnp.roll(self.x,-1,axis=-1) - jnp.roll(self.x,2,axis=-1))*jnp.roll(self.x,1,axis=-1) - self.x + 8.0
 
 if __name__ == "__main__":
@@ -45,14 +48,19 @@ if __name__ == "__main__":
     z0.x = 8.0
     # Apply proturbations
     for i in range(N):
-        # z0.x[i,0] = (i+1)*0.01
-        # z0.x = z0.x.at[i,0].add((i+1)*0.01)
+        # Note that z0 is a Tracept object but z0[...].x is a JAX array
+        #   i.e. in-place operations must always be preemptively indexed (here i is batch index, 0 is index in x)
         z0[i,0].x += (i+1)*0.01
+        # To emphasize the indexing point, this also works
+        # z0[i,0].x = z0[i].x[0] + (i+1)*0.01
+        # However, this does not
+        # z0[i].x[0] += (i+1)*0.01
 
     # Run JIT compiled integrator
     t, z = integrator(z0, dt=1E-2, T=30.0)
     # Print state at final time
-    print(z[-1].x.shape, z[-1].x)
+    print('Output shapes and terminal states:', z.x.shape, z[-1].x.shape)
+    print(z[-1].x)
     print('Is lerp working:', np.allclose((z[0].x+z[1].x)/2, z.lerp(0.5, np.arange(t.size)).x))
 
     # TODO: Plot first 3 states
