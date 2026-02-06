@@ -45,9 +45,15 @@ class Placeholder:
 
 # Indicates a field will be part of the dynamic shape, user provides shape of data (at a given time for a single MC sample)
 class Dynamic():
-    def __init__(self, shape = (), labels=None):
+    def __init__(self, default=None, shape=(), labels=None):
+        """
+        Args:
+            default: recommended default when instantiating (e.g. used in func:fill but not func:zeros),
+              should be broadcastable to arg:shape, must be broadcastable to arg:shape with z batch shape prepended
+        """
         if labels == None: labels = []
         
+        self.default = default
         self.shape = shape
         self.labels = labels
         if type(shape) is int:
@@ -286,19 +292,20 @@ def tmethod(func):
     
     return with_tracept
 
-def bake_list(z_list, z_ptr, dmap_z_I, dmap_dz_I, labels_I):
+def bake_list(z_list, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults):
     for z_item in z_list:
         if is_dataclass(type(z_item)):
-            z_ptr, dmap_z_I, dmap_dz_I = bake_branch(z_item, z_ptr, dmap_z_I, dmap_dz_I, labels_I)
+            z_ptr, dmap_z_I, dmap_dz_I = bake_branch(z_item, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults)
+        elif type(z_item) is Dynamic:
+            raise TypeError('not supported')
         elif type(z_item) is Derivative:
             raise TypeError('not supported')
-        elif is_dataclass(type(z_item)):
-            raise TypeError('not supported')
         elif type(z_item) is Placeholder:
-            raise ValueError('Field {} of {} was unset, stored error message: {}'.format(field.name, type(z_branch), value.error_message))
+            raise TypeError('not supported')
+            # raise ValueError('Field {} of {} was unset, stored error message: {}'.format(field.name, type(z_branch), value.error_message))
         # Can be static variable, leave it alone
     
-    return z_ptr, dmap_z_I, dmap_dz_I, labels_I
+    return z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults
 
 def add_label_I(label, I, labels_I):
     if label not in labels_I:
@@ -307,13 +314,13 @@ def add_label_I(label, I, labels_I):
     
     return labels_I
 
-def bake_branch(z_branch, z_ptr, dmap_z_I, dmap_dz_I, labels_I):
+def bake_branch(z_branch, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults):
     if is_dataclass(type(z_branch)):
         fields = get_fields(z_branch)
     elif type(z_branch) is list or type(z_branch) is tuple:
-        return bake_list(z_branch, z_ptr, dmap_z_I, dmap_dz_I, labels_I)
+        return bake_list(z_branch, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults)
     elif type(z_branch) is dict:
-        return bake_list(z_branch.values(), z_ptr, dmap_z_I, dmap_dz_I, labels_I)
+        return bake_list(z_branch.values(), z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults)
     else:
         raise TypeError('Unrecognized z branch type {}'.format(type(z_branch)))
     
@@ -327,12 +334,14 @@ def bake_branch(z_branch, z_ptr, dmap_z_I, dmap_dz_I, labels_I):
             for label in z_item.labels: # Record indices to dynamic variable with its labels
                 add_label_I(label, I, labels_I)
             setattr(z_branch, field.name, DynamicsMap(I))
+            if z_item.default is not None:
+                defaults.append((I, z_item.default))
             z_ptr += z_item.N
         elif type(z_item) is Derivative:
             dmap[z_item.field_name] = field.name # map is from a fields's name to it's derivative's name
         elif is_dataclass(type(z_item)) or type(z_item) in [list, tuple, dict]:
             # print('Processing child branch', field.name)
-            z_ptr, dmap_z_I, dmap_dz_I, labels_I = bake_branch(z_item, z_ptr, dmap_z_I, dmap_dz_I, labels_I)
+            z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults = bake_branch(z_item, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults)
         elif type(z_item) is Placeholder:
             raise ValueError('Field {} of {} was unset, stored error message: {}'.format(field.name, type(z_branch), z_item.error_message))
     
@@ -351,7 +360,7 @@ def bake_branch(z_branch, z_ptr, dmap_z_I, dmap_dz_I, labels_I):
     dmap_z_I  += [getattr(z_branch,value_name).I.ravel() for value_name in dmap.keys()]
     dmap_dz_I += [getattr(z_branch,deriv_name).I.ravel() for deriv_name in dmap.values()]
     
-    return z_ptr, dmap_z_I, dmap_dz_I, labels_I
+    return z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults
 
 # TODO: should we really be modifying z_tree?
 def bake_tree(z_tree):
@@ -359,7 +368,7 @@ def bake_tree(z_tree):
     This WILL MODIFY z_tree
     User of lables_I will see a list of jax index arrays, i.e. separate variables, without their names
     """
-    z_ptr, dmap_z_I, dmap_dz_I, labels_I = bake_branch(z_tree, z_ptr=0, dmap_z_I=[], dmap_dz_I=[], labels_I={})
+    z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults = bake_branch(z_tree, z_ptr=0, dmap_z_I=[], dmap_dz_I=[], labels_I={}, defaults=[])
     
     # Create arrays to be used in time stepping like z_dyn[...,dmap_z_I] += dt*z_dyn[...,dmap_dz_I])
     if len(dmap_z_I) > 0:
@@ -371,13 +380,26 @@ def bake_tree(z_tree):
     # for label, label_I in labels_I.items():
         # labels_I[label] = jnp.concatenate(label_I)
 
-    return { 'z_tree': z_tree, 'N_dyn': z_ptr, 'dmap_z_I': dmap_z_I, 'dmap_dz_I': dmap_dz_I, 'labels_I': labels_I }
+    return { 'z_tree': z_tree, 'N_dyn': z_ptr, 'dmap_z_I': dmap_z_I, 'dmap_dz_I': dmap_dz_I, 'labels_I': labels_I, 'defaults': defaults }
 
 # Preprocess component classes into an aggregate z usable in Tracept functions, create shared dynamic array while filling z with its index maps, and resolve derivative relationships
 def bake_trees(**z_branches):
     return bake_tree(tclass(make_dataclass('_GeneratedZ', [subclass_name for subclass_name in z_branches]))(**z_branches))
 
 def zeros(z_meta, shape=()):
+    """New state with all dynamic states initialized to 0.0, even if a default was specified
+    """
     if type(shape) is int:
         shape = (shape,)
     return TWrapper(jnp.zeros(shape+(z_meta['N_dyn'],)), z_meta['z_tree'], is_root=True)
+
+def fill(z_meta, shape=()):
+    """New state with all dynamic states to their specified default, 0.0 for each unspecified
+    """
+    if type(shape) is int:
+        shape = (shape,)
+    z = jnp.zeros(shape+(z_meta['N_dyn'],))
+    for I, default in z_meta['defaults']:
+        z = z.at[I].set(default)
+
+    return TWrapper(z, z_meta['z_tree'], is_root=True)
