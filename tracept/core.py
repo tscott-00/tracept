@@ -23,7 +23,8 @@ def tclass(cls=None, *, static_attrnames=[]):
         if not hasattr(cls, 'new'):
             setattr(cls, 'new', classmethod(lambda cls, *vargs, **kwargs: cls(*vargs, **kwargs)))
         jit_variables = []
-        cls = dataclass(cls) # Turn into dataclass
+        if not is_dataclass(cls):
+            cls = dataclass(cls) # Turn into dataclass
         fields = get_fields(cls) # Get fields (everything that was annotated)
         # TODO: Error if not annotated
         for field in fields:
