@@ -15,19 +15,23 @@ import jax
 import jax.numpy as jnp
 
 import tracept
-from tracept import tclass, tmethod, Placeholder, Dynamic, Derivative
+from tracept import tclass, tmethod, Dynamic, Derivative
 import tracept.odes
 
 @tclass
 class Lorenz96:
-    x:  jax.Array = Placeholder()
-    dx: jax.Array = Derivative('x')
+    # x:  jax.Array = Placeholder()
+    # dx: jax.Array = Derivative('x')
+    # Above is unnecessary boilerplate, for value can either be broadcastabled default or Dynamic instance to specify shape 
+    # TODO: remove Placeholder
+    x:  Dynamic
+    dx: Derivative('x') = None
 
     @classmethod
     def new(cls, dims):
         """Lorenz96 dynamics for a user-specified dimensionality."""
 
-        return cls(x=Dynamic(shape=dims))
+        return cls(x=Dynamic(8.0, shape=dims))
 
     @tmethod
     def __call__(self):
@@ -44,8 +48,8 @@ if __name__ == "__main__":
     integrator = tracept.odes.make_integrator(z_meta, tracept.odes.step_fe)
 
     # Allocate state with state and derivatives starting at zeros then initialize x to 1.0
-    z0 = tracept.zeros(z_meta, shape=N)
-    z0.x = 8.0
+    z0 = tracept.fill(z_meta, shape=N)
+    # z0.x = 8.0
     # Apply proturbations
     for i in range(N):
         # Note that z0 is a Tracept object but z0[...].x is a JAX array
