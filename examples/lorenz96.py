@@ -52,8 +52,9 @@ if __name__ == "__main__":
     # z0.x = 8.0
     # Apply proturbations
     for i in range(N):
-        # Note that z0 is a Tracept object but z0[...].x is a JAX array
-        #   i.e. in-place operations must always be preemptively indexed (here i is batch index, 0 is index in x)
+        # Note that z0 is a Tracept object but z0[...].x is a JAX array (or slice of one)
+        #   assignment of x (but not if subsequently sliced) will be intercepted, enabling in-place modificationss
+        #   note that in-place operations must always be preemptively indexed (here i is batch index, 0 is index in x)
         z0[i,0].x += (i+1)*0.01
         # To emphasize the indexing point, this also works
         # z0[i,0].x = z0[i].x[0] + (i+1)*0.01
@@ -68,3 +69,5 @@ if __name__ == "__main__":
     print('Is lerp working:', np.allclose((z[0].x+z[1].x)/2, z.lerp(0.5, np.arange(t.size)).x))
 
     # TODO: Plot first 3 states
+
+# TODO: need another example that uses a list, tuple, and dict

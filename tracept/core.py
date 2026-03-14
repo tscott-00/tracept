@@ -1,6 +1,8 @@
-# Core functionality
+"""Core functionality"""
+
 # Authors: Thomas A. Scott https://www.scott-aero.com/
 
+import inspect
 from functools import partial, reduce
 from dataclasses import dataclass, field, is_dataclass, make_dataclass
 from dataclasses import fields as get_fields
@@ -9,6 +11,9 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.typing as jtp
+
+# TODO: biscuit error
+# TODO:
 
 def tclass(cls=None, *, static_attrnames=[]):
     """Decorator to create a Tracept class, enabling functionality mutable JIT OOP.
@@ -45,7 +50,7 @@ class Placeholder:
         self.error_message = error_message
 
 # Indicates a field will be part of the dynamic shape, user provides shape of data (at a given time for a single MC sample)
-class Dynamic():
+class Dynamic:
     def __init__(self, default=None, shape=(), labels=None):
         """
         Args:
@@ -70,7 +75,7 @@ class Dynamic():
                     raise ValueError('Must indicate at least 1 value stored')
 
 # Indicates a derivative of a Dynamic variable
-class Derivative():
+class Derivative:
     def __init__(self, field_name: str, labels=None):
         if labels == None: labels = []
         
@@ -105,7 +110,8 @@ class TWrapper:
             if is_dataclass(type(value)):
                 return TWrapper(self.z_box, value, is_root=False, i_pre=self.i_pre)
             elif callable(value):
-                raise ValueError('Collections of functions not supported, may later support static functions')
+                return TWrapper(self.z_box, value, is_root=False, i_pre=self.i_pre)
+                # raise ValueError('Collections of functions not supported, may later support static functions')
             elif type(value) in [list, tuple, dict]:
                 return TWrapper.Iterable(self.z_box, value, self.i_pre)
             else:
@@ -207,7 +213,21 @@ class TWrapper:
         self.__dict__['i_pre'] = i_pre
     
     def __call__(self, *v, **k):
-        return self.z_node(*v, tracept_self=self, **k)
+        # print('z_node call', self.z_node, isinstance(self.z_node, tmethod))
+        if inspect.isfunction(self.z_node):
+            return self.z_node(*v, **k)
+        elif isinstance(self.z_node, tmethod):
+            if self.z_node.is_member:
+                return self.z_node(*v, tracept_self=self, **k)
+            else:
+                return self.z_node(*v, **k)
+        elif hasattr(self.z_node, '__call__'):
+            if isinstance(self.z_node.__call__, tmethod):
+                return self.z_node(*v, tracept_self=self, **k)
+            else:
+                raise ValueError('{} is a callable class but __call__ is not a tmethod'.format(self.z_node))
+        else:
+            raise ValueError('{} was called but is not a function, tmethod, or callable class'.format(self.z_node))
 
     def __getattr__(self, name):
         # value = self.z_node.__dict__[name]
@@ -241,78 +261,98 @@ class TWrapper:
         return TWrapper.LerpWrapper(self.z_box, self.z_node, i1, l)
 
     # TODO: repr for tree structure only, dynamic only, and static only, no children ie ...
-    def __repr__(self):
+    def __format__(self, spec):
         fields = get_fields(type(self.z_node))
-        fields_repr = ''
+        fields_repr = type(self.z_node).__name__ + '( '
+        do_dyn, do_leaves, do_subclasses = False, False, False
+        for s in spec:
+            match s:
+                case 'd': do_dyn = True
+                case 'l': do_leaves = True
+                case 't': do_subclasses = True
+                case _: raise ValueError('"{s}" is not a recognized format specifier, use "t" to show tclasses, "d" to show dynamics (and derivatives), and/or "l" to show other leaves'.format(s))
+
         for field in fields:
             value = getattr(self.z_node, field.name)
-            if type(value) is DynamicsMap:
-                fields_repr += '{}: {}, '.format(field.name, np.array2string(self.z_box.getz(value.I, i_pre=self.i_pre), max_line_width=1000))
-            elif is_dataclass(type(value)):
-                fields_repr += '{}( {} ), '.format(field.name, TWrapper(self.z_box, value, is_root=False, i_pre=self.i_pre))
+            if is_dataclass(type(value)): # TODO: assumed t class, allow others?
+                if do_subclasses:
+                    fields_repr += ('{}={:'+spec+'}, ').format(field.name, TWrapper(self.z_box, value, is_root=False, i_pre=self.i_pre))
+            elif type(value) is DynamicsMap:
+                if do_dyn:
+                    fields_repr += '{}={}, '.format(field.name, np.array2string(self.z_box.getz(value.I, i_pre=self.i_pre), max_line_width=1000))
             else:
-                fields_repr += '{}: {}, '.format(field.name, value)
-        return fields_repr
+                if do_leaves:
+                    fields_repr += '{}={}, '.format(field.name, value)
+        return fields_repr + " )"
+
+    def __repr__(self):
+        return self.__format__('dlt')
 
 # Tracept function decorator
 # Static functions can be called from anywhere and take and return only z
 # Member functions are only called from tracept static functions and can take and return anything
-def tmethod(func):
-    # @functools.wraps(func) # TODO: retain signature
-    # Users should call with z, internal state managers like integrators should call with z_dyn and z
-    def with_tracept(*vargs, **kwargs):
-        options = dict( # Default tracept options
-            z_out = True,
-            # TODO: static z option
-            # TODO: specific locked attribs (no read or write)
+# def tmethod(func=None, *, z_out=None):
+class tmethod:
+    def __init__(self, func=None):#, *, z_out=None):
+        self.is_pre_deco = func == None
+        # self.z_out = z_out
+        # TODO: specific locked attribs (no read or write)?
             # TODO: way to do separate containers for a set of active variables? could speed up things like pont solver a lot
-        )
-        if 'tracept_options' in kwargs:
-            for k, v in kwargs['tracept_options'].items():
-                options[k] = v
-            del kwargs['tracept_options']
+        if not self.is_pre_deco:
+            self.func = func
+            param_names = inspect.signature(func).parameters
+            self.is_member = len(param_names) > 0 and next(iter(param_names)) == 'self'
+            # self.z
 
-        # TODO: actually detect self via inspect
-        if len(vargs) > 0:
+            # print('new tmethod', func, inspect.signature(func).parameters[0], inspect.ismethod(func), inspect.isfunction(func))
+            # @functools.wraps(func) # TODO: retain signature
+
+    # Users should call with z, internal state managers like integrators should call with z_dyn and z
+    def __call__(self, *vargs, **kwargs):
+        if self.is_pre_deco:
+            if len(vargs) != 1 or len(kwargs) != 0:
+                raise RuntimeError('If arguments are provided to tmethod during decoration then further args are not allowed')
+            return tmethod(vargs[0], z_out=self.z_out)
+
+        if self.is_member:
             if not 'tracept_self' in kwargs:
-                # TODO: could maybe allow if it returns z and can figure out where it is inside z...
                 raise ValueError('Tracept member functions must be called from within a Tracept static function as part of wrapped z')
             # TODO: allow any return?
             # if 'z' in kwargs:
                 # return func(kwargs['tracept_self'], *vargs[1:], z=kwargs['z'])
             # else:
                 # return func(kwargs['tracept_self'], *vargs[1:])
-            filtered_kwargs = {k: v for k,v in kwargs.items() if k != 'tracept_self'}
-            # print([type(v) for v in vargs])
-            return func(kwargs['tracept_self'], *vargs[1:], **filtered_kwargs)
+            tracept_self = kwargs['tracept_self']
+            del kwargs['tracept_self']
+            return self.func(tracept_self, *vargs, **kwargs)
         else:
             if 'z_tree' in kwargs:
-                result = func(z=TWrapper(kwargs['z_dyn'], kwargs['z_tree'], is_root=True))
+                result = self.func(z=TWrapper(kwargs['z_dyn'], kwargs['z_tree'], is_root=True))
                 # TODO: allow other return values along with z?
-                if options['z_out']:
+                # if self.z_out:
+                if isinstance(result, TWrapper):
                     result = result.z_box.z_dyn
             elif 'z' in kwargs:
-                # If given a TWrapper, know this is Traception and don't intervene
+                # If given a TWrapper, know this is nested call and don't intervene
                 # TODO: allow generic return if nested static? take root flag for clarity?
-                result = func(z=kwargs['z'])
+                result = self.func(z=kwargs['z'])
             else:
-                raise ValueError('Tracept methods must be called with either wrapped z kwarg or both z_tree and z_dyn kwargs')
+                raise ValueError('tmethods must be called with either wrapped z kwarg or both z_tree and z_dyn kwargs')
             return result
-    
-    return with_tracept
 
 def bake_list(z_list, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults):
     for z_item in z_list:
         if is_dataclass(type(z_item)):
-            z_ptr, dmap_z_I, dmap_dz_I = bake_branch(z_item, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults)
-        # elif type(z_item) is Dynamic:
+            z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults = bake_branch(z_item, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults)
+        elif type(z_item) in [Dynamic, Derivative]:
+            raise TypeError('{} not supported'.format(type(z_item)))
         #     raise TypeError('not supported')
         # elif type(z_item) is Derivative:
         #     raise TypeError('not supported')
         # elif type(z_item) is Placeholder:
         #     raise TypeError('not supported')
-        else:
-            raise TypeError('not supported')
+        # else:
+        #     raise TypeError('{} not supported'.format(type(z_item)))
             # raise ValueError('Field {} of {} was unset, stored error message: {}'.format(field.name, type(z_branch), value.error_message))
         # Can be static variable, leave it alone
     
@@ -410,9 +450,10 @@ def bake_tree(z_tree):
 
     return { 'z_tree': z_tree, 'N_dyn': z_ptr, 'dmap_z_I': dmap_z_I, 'dmap_dz_I': dmap_dz_I, 'labels_I': labels_I, 'defaults': defaults }
 
-# Preprocess component classes into an aggregate z usable in Tracept functions, create shared dynamic array while filling z with its index maps, and resolve derivative relationships
-def bake_trees(**z_branches):
-    return bake_tree(tclass(make_dataclass('_GeneratedZ', [subclass_name for subclass_name in z_branches]))(**z_branches))
+# TODO: removing support because not annotated so can't dyn as a branch
+# # Preprocess component classes into an aggregate z usable in Tracept functions, create shared dynamic array while filling z with its index maps, and resolve derivative relationships
+# def bake_trees(**z_branches):
+#     return bake_tree(tclass(make_dataclass('_GeneratedZ', [subclass_name for subclass_name in z_branches]))(**z_branches))
 
 # def zeros(z_meta, shape=()):
 #     """New state with all dynamic states initialized to 0.0, even if a default was specified
