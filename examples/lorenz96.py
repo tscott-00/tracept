@@ -61,6 +61,11 @@ if __name__ == "__main__":
         # However, this does not
         # z0[i].x[0] += (i+1)*0.01
 
+        # Note the pitfall, here z0.x will not be modified, only _x
+        #   this is the same behavior as numpy and regular JAX, storing a slice creates a copy not a reference
+        # _x = z0.x
+        # _x += 1
+
     # Run JIT compiled integrator
     t, z = integrator(z0, dt=1E-2, T=30.0)
     # Print state at final time
