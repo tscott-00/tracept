@@ -28,7 +28,6 @@ def integrator_step(i, args, fstep, upd_dyn):
     dt = t[i] - t[i-1]
 
     # Calculate derivative at last time and record, i.e. the state at i-1
-    # jax.debug.print('I {} {}', z_tree.q.I, z_dyn.shape)
     z_dyn = upd_dyn(z_dyn=z_dyn, z_tree=z_tree)
     z_dyn_stack = z_dyn_stack.at[i-1,...].set(z_dyn)
     
