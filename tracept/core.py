@@ -7,6 +7,7 @@ import inspect
 from functools import partial, reduce
 from dataclasses import dataclass, field, is_dataclass, make_dataclass
 from dataclasses import fields as get_fields
+from typing import Any
 
 import numpy as np
 import jax
@@ -436,7 +437,7 @@ def bake_branch(z_branch, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults):
 @dataclass
 # class TBakedPytree:
 class TMetaPytree:
-    z_tree: tp.Any
+    z_tree: Any
     N_dyn: int
     dmap_z_I: jax.Array #: index array (into underlying array) to all dynamic values with a corresponding derivative
     dmap_dz_I: jax.Array #: index array (into underlying array) to all derivative values
