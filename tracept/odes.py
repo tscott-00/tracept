@@ -60,7 +60,7 @@ def make_integrator(z_meta, fstep, upd_dyn=None):
         else:
             raise TypeError('Must use a Tracept wrapped z to start the integrator.')
 
-        Nt = jnp.ceil(T / dt).astype(int)
+        Nt = jnp.ceil(T / dt).astype(int) + 1
         t = (jnp.arange(Nt)*dt).at[-1].set(T)
         
         z_dyn_stack = jnp.zeros((Nt,)+z_dyn0.shape)
