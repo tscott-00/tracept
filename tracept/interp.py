@@ -1,4 +1,6 @@
-# Interpolation helpers
+"""Interpolation helpers"""
+
+# Authors: Thomas A. Scott https://www.scott-aero.com/
 
 from functools import partial, reduce
 from dataclasses import dataclass, field, is_dataclass, make_dataclass

@@ -1,4 +1,5 @@
-# Core functionality
+"""Core Tracept functionality"""
+
 # Authors: Thomas A. Scott https://www.scott-aero.com/
 
 from functools import partial, reduce
@@ -9,6 +10,9 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.typing as jtp
+
+# TODO: via meta, allow int and bool dynamics natively
+# TODO: allow dynamics to be stored individually in the box? then aggregates need to be stacked... unless aggregates stay as list of I then it is natural
 
 def tclass(cls=None, *, static_attrnames=[]):
     """Decorator to create a Tracept class, enabling functionality mutable JIT OOP.
@@ -197,7 +201,7 @@ class TWrapper:
         # Use __dict__ when initializing to avoid __setattr__
         if is_root:
             self.__dict__['z_box'] = self.ZBox(z_dyn)
-        else:
+        else: # TODO: check if is box already
             self.__dict__['z_box'] = z_dyn
         self.__dict__['z_node'] = z_node
         # if i_t == None:
@@ -318,7 +322,7 @@ def bake_list(z_list, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults):
     
     return z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults
 
-def add_label_I(label, I, labels_I):
+def add_label_I(label: str, I: jax.Array, labels_I: list):
     if label not in labels_I:
         labels_I[label] = []
     labels_I[label].append(I)
@@ -390,6 +394,17 @@ def bake_branch(z_branch, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults):
     
     return z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults
 
+# TODO: pass this around during init instead of pieces...
+@dataclass
+# class TBakedPytree:
+class TMetaPytree:
+    z_tree: tp.Any
+    N_dyn: int
+    dmap_z_I: jax.Array #: index array (into underlying array) to all dynamic values with a corresponding derivative
+    dmap_dz_I: jax.Array #: index array (into underlying array) to all derivative values
+    labels_I: dict[str, list[jax.Array]] #: for each label, a list of index arrays (into underlying array)
+    defaults: list[tuple[jax.Array, jtp.ArrayLike]] #: index arrays into underlying array to a broadcastable default
+
 # TODO: should we really be modifying z_tree?
 def bake_tree(z_tree):
     """
@@ -408,27 +423,51 @@ def bake_tree(z_tree):
     # for label, label_I in labels_I.items():
         # labels_I[label] = jnp.concatenate(label_I)
 
+    # return TBakedPytree(z_tree, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults)
     return { 'z_tree': z_tree, 'N_dyn': z_ptr, 'dmap_z_I': dmap_z_I, 'dmap_dz_I': dmap_dz_I, 'labels_I': labels_I, 'defaults': defaults }
 
 # Preprocess component classes into an aggregate z usable in Tracept functions, create shared dynamic array while filling z with its index maps, and resolve derivative relationships
-def bake_trees(**z_branches):
+def bake_trees(**z_branches) -> TBakedPytree:
     return bake_tree(tclass(make_dataclass('_GeneratedZ', [subclass_name for subclass_name in z_branches]))(**z_branches))
 
-# def zeros(z_meta, shape=()):
-#     """New state with all dynamic states initialized to 0.0, even if a default was specified
-#     """
-#     if type(shape) is int:
-#         shape = (shape,)
-#     return TWrapper(jnp.zeros(shape+(z_meta['N_dyn'],)), z_meta['z_tree'], is_root=True)
+# TODO: what about a metaclass for tclasses so regular __init__ bakes it? not much overhead and uncommon to non-copy instantiate without changing anything static
 
-def fill(z_meta, shape=()):
+def fill(z_meta, shape=(), jittable=False) -> TWrapper:
     """New state with all dynamic states to their specified default, 0.0 for each unspecified
     """
     if type(shape) is int:
         shape = (shape,)
-    z = np.zeros(shape+(z_meta['N_dyn'],))
-    for I, default in z_meta['defaults']:
-        z[...,I] = default
-    z = jnp.array(z)
+    if jittable:
+        z = jnp.zeros(shape+(z_meta['N_dyn'],))
+        for I, default in z_meta['defaults']:
+            z = z.at[...,I].set(default)
+    else:
+        z = np.zeros(shape+(z_meta['N_dyn'],))
+        for I, default in z_meta['defaults']:
+            z[...,I] = default
+        z = jnp.array(z)
 
     return TWrapper(z, z_meta['z_tree'], is_root=True)
+
+# TODO: allow copy of children? would need reverse index lookup
+def copy(z: TWrapper) -> TWrapper:
+    """Copy an instance (from fill or instantiate) of an entire Tracept tree.
+    
+    z must be the root (i.e. z not z.child) but can be indexed (i.e. z[0] is ok), in which case only the slice of the underlying array will be copied.
+
+    Args:
+      z A tracept instance root.
+    """
+    if not z.is_root:
+        raise ValueError('Can only copy the z_tree from the root')
+    new_z_dyn = jnp.copy(z.z_box.z_dyn if z.i_pre == None else z.z_box.z_dyn[i_pre])
+    return TWrapper(jnp.copy(z.z_box.z_dyn), is_root=True)
+
+# TODO: doesn't work with odes unless store the meta, which should be free since JAX only sees underlying tree but not the wrapper
+def instantiate(z_tree, shape=()):
+    """Create a usable instance of a Tracept tree, equivalent to bake then fill.
+
+    Calling bake once then fill multiple times is recommended if multiple instances are to be created of the same Tracept tree and usage of defaults is desired.
+    However, if copies are suitable, then instantiate then copy is liekly more convenient and efficient.
+    """
+    return fill(bake_tree(z_tree), shape)

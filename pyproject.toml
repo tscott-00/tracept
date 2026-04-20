@@ -28,3 +28,6 @@ description = "JIT-compile-time utilities for cleaner JAX code, with extra utili
 
 [project.urls]
 Homepage = "https://github.com/tscott-00/tracept"
+
+[pytest]
+testpaths = ["tests"]

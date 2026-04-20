@@ -20,6 +20,7 @@ def step_fe(
     z_dyn, z_tree, dmap_z_I, dmap_dz_I,
     dt, upd_dyn,
 ):
+    # TODO: more convenient access? z.__states__ += dt*z.__derivs__ ; where states is a labeled attr that is aggregated, put Derivative in odes instead of core
     return z_dyn.at[...,dmap_z_I].add(dt*z_dyn[...,dmap_dz_I])
 
 # Generic integrator step, currently set up for predetermind time steps
