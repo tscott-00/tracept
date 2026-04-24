@@ -4,7 +4,6 @@
 
 import os
 import time
-import argparse
 from pathlib import Path
 
 import numpy as np
@@ -15,25 +14,24 @@ import jax
 import jax.numpy as jnp
 
 import tracept
-from tracept import tclass, tmethod, Dynamic, Derivative
-import tracept.odes
+from tracept import Tracepted, Mutable
+from tracept.odes import Derivative
 
-@tclass
-class Lorenz96:
-    # x:  jax.Array = Placeholder()
-    # dx: jax.Array = Derivative('x')
-    # Above is unnecessary boilerplate, for value can either be broadcastabled default or Dynamic instance to specify shape 
-    # TODO: remove Placeholder
-    x:  Dynamic
+# TODO: is meta really a good idea? needs to only happen at highest level - not great for interopability
+#    unless children can be wrapped - could detect if store the original tin (before replacing stuff with mid) or offsetting their mid 
+#    can't modify Mutable etc between init and bake but not a big issue
+
+class Lorenz96(metaclass=Tracepted):
+    x:  Mutable
     dx: Derivative('x') = None
 
     @classmethod
-    def new(cls, dims):
+    def new(cls, dims, batch_shape=()):
         """Lorenz96 dynamics for a user-specified dimensionality."""
 
-        return cls(x=Dynamic(8.0, shape=dims))
+        return cls(x=Mutable(8.0, shape=dims), batch_shape=batch_shape)
 
-    @tmethod
+    # @tmethod
     def __call__(self):
         """Update derivatives using internal state.
 
@@ -43,35 +41,35 @@ class Lorenz96:
         self.dx = (jnp.roll(self.x,-1,axis=-1) - jnp.roll(self.x,2,axis=-1))*jnp.roll(self.x,1,axis=-1) - self.x + 8.0
 
 if __name__ == "__main__":
-    N = 2 # Number of distinct sims to run simulatenously
-    z_meta = tracept.bake_tree(Lorenz96.new(dims=8))
-    integrator = tracept.odes.make_integrator(z_meta, tracept.odes.step_fe)
+    import argparse
 
-    # Allocate state with state and derivatives starting at zeros then initialize x to 1.0
-    z0 = tracept.fill(z_meta, shape=N)
-    # z0.x = 8.0
+    N = 2 # Number of distinct sims to run simulatenously
+    state = Lorenz96.new(dims=8, batch_shape=N)
+
     # Apply proturbations
     for i in range(N):
         # Note that z0 is a Tracept object but z0[...].x is a JAX array (or slice of one)
         #   assignment of x (but not if subsequently sliced) will be intercepted, enabling in-place modificationss
         #   note that in-place operations must always be preemptively indexed (here i is batch index, 0 is index in x)
-        z0[i,0].x += (i+1)*0.01
-        # To emphasize the indexing point, this also works
-        # z0[i,0].x = z0[i].x[0] + (i+1)*0.01
+        state[i,0].x += (i+1)*0.01
+        # To emphasize the indexing point, these also work
+        # state[i,0].x = state[i].x[0] + (i+1)*0.01
+        # state[i].x = state[i].x.at[0].add((i+1)*0.01)
         # However, this does not
-        # z0[i].x[0] += (i+1)*0.01
+        # state[i].x[0] += (i+1)*0.01
 
+        # TODO: no longer a pitfall since no global array
         # Note the pitfall, here z0.x will not be modified, only _x
         #   this is the same behavior as numpy and regular JAX, storing a slice creates a copy not a reference
-        # _x = z0.x
+        # _x = state.x
         # _x += 1
 
     # Run JIT compiled integrator
-    t, z = integrator(z0, dt=1E-2, T=30.0)
+    t, states = tracept.odes.make_integrator(tracept.odes.step_fe)(state, dt=1E-2, T=30.0)
     # Print state at final time
-    print('Output shapes and terminal states:', z.x.shape, z[-1].x.shape)
-    print(z[-1].x)
-    print('Is lerp working:', np.allclose((z[0].x+z[1].x)/2, z.lerp(0.5, np.arange(t.size)).x))
+    print('Output shapes and terminal states:', states.x.shape, states[-1].x.shape)
+    print(states[-1].x)
+    print('Is lerp working:', np.allclose((states[0].x+states[1].x)/2, states.lerp(0.5, np.arange(t.size)).x))
 
     # TODO: Plot first 3 states
 

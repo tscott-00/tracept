@@ -1,6 +1,5 @@
 """Core Tracept functionality"""
 
-
 # Authors: Thomas A. Scott https://www.scott-aero.com/
 
 import inspect
@@ -16,8 +15,142 @@ import jax.typing as jtp
 
 # TODO: via meta, allow int and bool dynamics natively
 # TODO: allow dynamics to be stored individually in the box? then aggregates need to be stacked... unless aggregates stay as list of I then it is natural
-# TODO: biscuit error
 
+# TODO: make clear what limitations on calling are - can wrap inside jit when jitting then remake outside, but is it good to return wrapper and have JAX pytree it?
+#       issue is can't use the wrapper we entered with since immutable jax pytree... JIT needs to only see the pieces
+#       #1: jit sees tmethod, takes in jax pytree TWrapper, take appart the jaxed static list into a python list, give mutable version to actual function during compilation
+#       #2: custom jit takes in vanilla twrap, unpacks, passes to jax jitted wrap func that repacks sends to actual f, unpacks and returns out of jit, then it is repacked
+
+# TODO: test on 0 muts
+# TODO: nested twrap
+
+class Tracepted(type):
+    # TODO: tmethod all member funcs? they can all only be called from wrap now
+    def __new__(mcs, name, bases, dct):
+        return tclass(super().__new__(mcs, name, bases, dct))
+
+    def __call__(cls, *args, batch_shape=(), **kwargs):
+        # Create and initialize the underlying tclass instance
+        tin = super().__call__(*args, **kwargs)
+
+        if tin.__is_baked__:
+            # If object is being created using contents of an already baked tin, it is JAX filling a pytree with tracers so we leave it alone
+            return tin
+        else:
+            tin.__is_baked__ = True
+            # Bake it, i.e. build meta describing all Mutable
+            meta = TWrapper.Meta()
+            bake_branch(tin, meta)
+            
+            if type(batch_shape) is int:
+                batch_shape = (batch_shape,)
+
+            return TWrapper(tin, TWrapper.Box(meta.new_muts(batch_shape), meta), is_root=True)
+
+# TODO: in other file
+class jit:
+    # TODO: allow static args etc for jax
+    def __init__(self, func=None):#, *, z_out=None):
+        self.is_pre_deco = func == None
+        if not self.is_pre_deco:
+            self.func = func
+            param_names = inspect.signature(func).parameters
+            self.is_member = len(param_names) > 0 and next(iter(param_names)) == 'self'
+
+    def __call__(self, *vargs, **kwargs):
+        if self.is_pre_deco:
+            if len(vargs) != 1 or len(kwargs) != 0:
+                raise RuntimeError('If arguments are provided to tmethod during decoration then further args are not allowed')
+            return tmethod(vargs[0])
+
+        if self.is_member:
+            raise NotImplementedError('CBL')
+        else:
+            def outer(*v, **k):
+                args = list(v) + list(k.values())
+                targ_info, muts, rarg_I, rargs = [], [], [], []
+                for i, arg in enumerate(args):
+                    if type(arg) is TWrapper:
+                        muts += arg.box.muts
+                        targ_info.append((i, len(muts), arg.node, arg.box.meta))
+                    else:
+                        rarg_I.append(i)
+                        rargs.append(arg)
+                @jax.jit
+                def jinner(muts, rargs, N_args=len(args), rarg_I=rarg_I, keys=k.keys()):
+                    args = [None]*N_args
+                    ptr_mut = 0
+                    for i, N_mut, tin, meta in targ_info:
+                        args[i] = TWrapper(tin, TWrapper.Box(muts[ptr_mut:ptr_mut+N_mut], meta))
+                        ptr_mut += N_mut
+                    for i, rarg in zip(rarg_I, rargs):
+                        args[i] = rargs
+                    _v, _k = args[:Nv], zip(keys, args[Nv:])
+                    outputs = self.func(*_v, **_k)
+                    muts = []
+                    for i, *_ in targ_info:
+                        muts += args[i].box.muts
+                    return muts, outputs
+                muts, outputs = jinner(muts, rargs)
+
+                ptr_mut = 0
+                for i, N_mut, tin, meta in targ_info:
+                    args[i].box.muts = muts[ptr_mut:ptr_mut+N_mut]
+                    ptr_mut += N_mut
+
+                return outputs
+            return outer
+
+
+
+
+# Tracept function decorator
+# Static functions can be called from anywhere and take and return only z
+# Member functions are only called from tracept static functions and can take and return anything
+# class tmethod:
+#     def __init__(self, func=None):#, *, z_out=None):
+#         self.is_pre_deco = func == None
+#         # self.z_out = z_out
+#         # TODO: specific locked attribs (no read or write)?
+#             # TODO: way to do separate containers for a set of active variables? could speed up things like pont solver a lot
+#         if not self.is_pre_deco:
+#             self.func = func
+#             param_names = inspect.signature(func).parameters
+#             self.is_member = len(param_names) > 0 and next(iter(param_names)) == 'self'
+
+#             # print('new tmethod', func, inspect.signature(func).parameters[0], inspect.ismethod(func), inspect.isfunction(func))
+#             # @functools.wraps(func) # TODO: retain signature
+
+#     # Users should call with z, internal state managers like integrators should call with z_dyn and z
+#     def __call__(self, *vargs, **kwargs):
+#         if self.is_pre_deco:
+#             if len(vargs) != 1 or len(kwargs) != 0:
+#                 raise RuntimeError('If arguments are provided to tmethod during decoration then further args are not allowed')
+#             return tmethod(vargs[0])#, z_out=self.z_out)
+
+#         if self.is_member:
+#             if not 'tracept_self' in kwargs:
+#                 raise ValueError('Tracept member functions must be called from within a Tracept static function as part of wrapped z')
+#             tracept_self = kwargs['tracept_self']
+#             del kwargs['tracept_self']
+#             return self.func(tracept_self, *vargs, **kwargs)
+#         else:
+#             # TODO: how does jax deal with the io? should we 
+#             if 'z_tree' in kwargs:
+#                 result = self.func(z=TWrapper(kwargs['z_dyn'], kwargs['z_tree'], is_root=True))
+#                 # TODO: allow other return values along with z?
+#                 # if self.z_out:
+#                 if isinstance(result, TWrapper):
+#                     result = result.z_box.z_dyn
+#             elif 'z' in kwargs:
+#                 # If given a TWrapper, know this is nested call and don't intervene
+#                 # TODO: allow generic return if nested static? take root flag for clarity?
+#                 result = self.func(z=kwargs['z'])
+#             else:
+#                 raise ValueError('tmethods must be called with either wrapped z kwarg or both z_tree and z_dyn kwargs')
+#             return result
+
+# TODO: metaclass that does baking when init?
 def tclass(cls=None, *, static_attrnames=[]):
     """Decorator to create a Tracept class, enabling functionality mutable JIT OOP.
     All attributes of the class must be annotated in dataclass convention.
@@ -27,18 +160,20 @@ def tclass(cls=None, *, static_attrnames=[]):
     Args:
         static_attrnames: names of attributes to make static, only these attributes are guaranteed to trigger recompilation
     """
-    def _tclass(cls):
+    def _tclass(cls, static_attrnames=static_attrnames):
         if not hasattr(cls, 'new'):
             setattr(cls, 'new', classmethod(lambda cls, *vargs, **kwargs: cls(*vargs, **kwargs)))
         jit_variables = []
-        if not is_dataclass(cls):
-            cls = dataclass(cls) # Turn into dataclass
+        # if not is_dataclass(cls):
+        cls.__annotations__['__is_baked__'] = bool
+        setattr(cls, '__is_baked__', False)
+        static_attrnames = ['__is_baked__'] + static_attrnames
+        cls = dataclass(cls, kw_only=True) # Turn into dataclass
         fields = get_fields(cls) # Get fields (everything that was annotated)
         # TODO: Error if not annotated
         for field in fields:
             if not field.name in static_attrnames:
                 jit_variables.append(field.name)
-        # print(cls, jit_variables, static_attrnames)
         jax.tree_util.register_dataclass(cls, data_fields=jit_variables, meta_fields=static_attrnames)
         return cls
     
@@ -47,106 +182,87 @@ def tclass(cls=None, *, static_attrnames=[]):
         return _tclass
     return _tclass(cls)
 
-# Class that indicates an incorrect configuration if not changed
-class Placeholder:
-    def __init__(self, error_message='Placeholder not set, make sure a tclass is constructed via MyTClass.new() instead of MyTClass()'):
-        self.error_message = error_message
-
 # Indicates a field will be part of the dynamic shape, user provides shape of data (at a given time for a single MC sample)
-class Dynamic:
+class Mutable:
     def __init__(self, default=None, shape=(), labels=None):
         """
         Args:
-            default: recommended default when instantiating (e.g. used in func:fill but not func:zeros),
-              should be broadcastable to arg:shape, must be broadcastable to arg:shape with z batch shape prepended
+          default: recommended default when instantiating (e.g. used in func:fill but not func:zeros),
+            should be broadcastable to arg:shape, must be broadcastable to arg:shape with z batch shape prepended
         """
         if labels == None: labels = []
         
         self.default = default
-        self.shape = shape
-        self.labels = labels
         if type(shape) is int:
-            self.N = shape
-        else: # Assume iterable, for will throw type error if shape is invalid type
-            self.N = 1
-            if len(shape) > 0: # Empty tuple is single value
-                for N_i in shape:
-                    if not type(N_i) is int:
-                        raise TypeError('An iterable shape must only contain int values')
-                    self.N *= N_i
-                if self.N < 1:
-                    raise ValueError('Must indicate at least 1 value stored')
-
-# Indicates a derivative of a Dynamic variable
-class Derivative:
-    def __init__(self, field_name: str, labels=None):
-        if labels == None: labels = []
-        
-        self.field_name = field_name
+            shape = (shape,)
+        self.shape = shape
         self.labels = labels
 
 # Dynamic and Derivative fields in a dsp_class are automatically turned into a DynamicsMap during build_z and store indices to the dynamic map
-@partial(jax.tree_util.register_dataclass, data_fields=['I'], meta_fields=[])
-class DynamicsMap:
-    I: jtp.ArrayLike # Indices into aggregate dynamic state
-    def __init__(self, I):
-        self.I = I
+# @partial(jax.tree_util.register_dataclass, data_fields=['i'], meta_fields=[])
+@partial(jax.tree_util.register_dataclass, data_fields=[], meta_fields=['i'])
+@dataclass
+class MutableID:
+    i: int
+
+    def __hash__(self): return hash(self.i)
 
 class TWrapper:
     class Iterable:
+        @dataclass
         class Iterator:
-            def __init__(self, z_node_wrapper, z_node_iter):
-                self.z_node_wrapper = z_node_wrapper
-                self.z_node_iter = z_node_iter
+            node_wrapper: Any
+            node_iter: Any
             
             def __next__(self):
-                value = self.z_node_iter.__next__()
-                return self.z_node_wrapper.wrap(value)
+                value = self.node_iter.__next__()
+                return self.node_wrapper.wrap(value)
         
-        def __init__(self, z_box, z_node, i_pre=None):
-            self.__dict__['z_box'] = z_box
-            self.__dict__['z_node'] = z_node
-            self.__dict__['i_pre'] = i_pre
+        def __init__(self, node, box, idx=None):
+            self.__dict__['node'] = node
+            self.__dict__['box'] = box
+            self.__dict__['idx'] = idx
         
         def wrap(self, value):
             # TODO: if support dynamic in init, support DynamicsMap here...
             if is_dataclass(type(value)):
-                return TWrapper(self.z_box, value, is_root=False, i_pre=self.i_pre)
+                return TWrapper(value, self.box, is_root=False, idx=self.idx)
             elif callable(value):
-                return TWrapper(self.z_box, value, is_root=False, i_pre=self.i_pre)
+                return TWrapper(value, self.box, is_root=False, idx=self.idx)
                 # raise ValueError('Collections of functions not supported, may later support static functions')
             elif type(value) in [list, tuple, dict]:
-                return TWrapper.Iterable(self.z_box, value, self.i_pre)
+                return TWrapper.Iterable(value, self.box, self.idx)
             else:
                 return value
         
         def __getitem__(self, item):
-            value = self.z_node[item]
+            value = self.node[item]
             return self.wrap(value)
         
         def __iter__(self):
-            # print(type(self.z_node))
             # If dict then return standard key iterator
-            if type(self.z_node) == dict:
-                return self.z_node.__iter__()
-            return self.Iterator(self, self.z_node.__iter__())
+            if type(self.node) == dict:
+                return self.node.__iter__()
+            return self.Iterator(self, self.node.__iter__())
     
     class LerpWrapper:
-        def __init__(self, z_dyn, z_node, i1_pre, l_pre):
-            self.__dict__['z_box'] = z_dyn
-            self.__dict__['z_node'] = z_node
+        def __init__(self, node, box, i1_pre, l_pre):
+            self.__dict__['node'] = node
+            self.__dict__['box'] = box
             self.__dict__['i1_pre'] = i1_pre
             self.__dict__['l_pre'] = l_pre
+
+        # TODO: label support
 
         def __setattr__(self, name, value):
             raise RuntimeError('Interpolation is for get access only')
 
         def __getattr__(self, name):
-            value = getattr(self.z_node, name) # Get value or function from actual z object
-            if type(value) is DynamicsMap:
-                return self.z_box.getz(value.I, i_pre=(self.i1_pre-1,))*(1-self.l_pre) + self.z_box.getz(value.I, i_pre=(self.i1_pre,))*self.l_pre
+            value = getattr(self.node, name) # Get value or function from actual z object
+            if type(value) is MutableID:
+                return self.box.get_mut(value, idx=(self.i1_pre-1,))*(1-self.l_pre) + self.box.get_mut(value, idx=(self.i1_pre,))*self.l_pre
             elif is_dataclass(type(value)):
-                return TWrapper.LerpWrapper(self.z_box, value, self.i1_pre, self.l_pre)
+                return TWrapper.LerpWrapper(value, self.box, self.i1_pre, self.l_pre)
             elif type(value) in [list, tuple, dict]:
                 raise ValueError('Upcoming feature') # TODO: need another? or just test in wrap?
             else:
@@ -176,338 +292,225 @@ class TWrapper:
     #     def __bool__(self): return self.aval._bool(self)
     #     def __nonzero__(self): return self.aval._nonzero(self)
 
-    # Shared container to keep track of mutating z_dyn, subclass so it can be used in other wrappers easily
-    class ZBox:
-        def __init__(self, z_dyn):
-            self.z_dyn = z_dyn
+    # TODO: pass this around during init instead of pieces...
+    # TODO: only labeled_mut_ids is needed during runtime... and MutableID needs to be static to use as index the way i do
+    @partial(jax.tree_util.register_dataclass, data_fields=['mut_shapes', 'labeled_mut_ids', 'defaults'], meta_fields=[])
+    @dataclass
+    class Meta:
+        # batch_shape:     tuple[int]
+        mut_shapes:      list[tuple[int]]               = field(default_factory=lambda:[])
+        labeled_mut_ids: dict[str, list[MutableID]]     = field(default_factory=lambda:{}) #: for each label, a list of identifiers
+        defaults:        dict[MutableID, jtp.ArrayLike] = field(default_factory=lambda:{}) #: index arrays into underlying array to a broadcastable default
+        #run: RuntimeMeta
 
-        def getz(self, I, i_pre: tuple = None):
-            if i_pre == None:
-                return self.z_dyn[..., I]
-            else:
-                Dz = len(self.z_dyn.shape)
-                if len(i_pre) < Dz:
-                    return self.z_dyn[i_pre+(..., I)].T # TODO: better way of dealing with weird transposing np does?
-                else:
-                    return self.z_dyn[i_pre[:Dz-1]+(I[i_pre[Dz-1:]],)]
-                # return self.z_dyn[i_pre+(:,I,)]
+        def append(self, mut: Mutable, default: jtp.ArrayLike) -> MutableID:
+            """
+            Args:
+              mut the specificier for the mutable variable
+              val the default value to use, user may choose to just pass in mut.default
+            Returns:
+              mid identifier used to obtain the mutable's value in the future
+            """
+            mid = MutableID(len(self.mut_shapes))
+            self.mut_shapes.append(mut.shape)
+            for label in mut.labels:
+                if label not in self.labeled_mut_ids:
+                    self.labeled_mut_ids[label] = []
+                self.labeled_mut_ids[label].append(mid)
+
+            if default is None:
+                default = mut.default
+            if default is not None: # TODO: factor too?
+                self.defaults[mid] = default
+            
+            return mid
+
+        def new_muts(self, batch_shape: tuple) -> tuple[jax.Array]:
+            """
+            Args:
+              batch_shape the shape to prepend to all mutable shapes 
+            Returns:
+              muts The arrays to store mutable data
+            """
+            # print('new muts', batch_shape, self.mut_shapes)
+            # print(batch_shape+self.mut_shapes[0], )
+            muts = [jnp.zeros(batch_shape+shape) for shape in self.mut_shapes]
+            # print(muts[0].shape)
+            for mid, default in self.defaults.items():
+                muts[mid.i] = muts[mid.i].at[...].set(default)
+
+            return muts
+
+    # Shared container to keep track of mutating z_dyn, subclass so it can be used in other wrappers easily
+    @dataclass
+    class Box:
+        muts: list[jax.Array]
+        meta: TWrapper.Meta
+        batch_shape: tuple = None
+
+        def __post_init__(self):
+            N_test = len(self.meta.mut_shapes[0])
+            self.batch_shape = self.muts[0].shape[:-N_test] if N_test > 0 else self.muts[0].shape
+
+        def get_mut(self, mid, idx = ...):
+            return self.muts[mid.i][idx]
         
-        def setz(self, I, value, i_pre: tuple = None):
-            if i_pre == None:
-                self.z_dyn = self.z_dyn.at[..., I].set(value)
-            else:
-                Dz = len(self.z_dyn.shape)
-                if len(i_pre) < Dz:
-                    self.z_dyn = self.z_dyn.at[i_pre+(..., I)].set(value)
-                else:
-                    self.z_dyn = self.z_dyn.at[i_pre[:Dz-1]+(I[i_pre[Dz-1:]],)].set(value)
+        def set_mut(self, mid, value, idx = ...):
+            self.muts[mid.i] = self.muts[mid.i].at[idx].set(value)
     
-    def __init__(self, z_dyn, z_node, is_root, i_pre=None):
+    def __init__(self, node, box: TWrapper.Box, is_root: bool = True, idx=...):
         # Use __dict__ when initializing to avoid __setattr__
-        if is_root:
-            self.__dict__['z_box'] = self.ZBox(z_dyn)
-        else: # TODO: check if is box already
-            self.__dict__['z_box'] = z_dyn
-        self.__dict__['z_node'] = z_node
-        # if i_t == None:
-            # i_t = slice(self.__dict__['z_box'].z_dyn.shape[0])
-        if i_pre != None and type(i_pre) != tuple:
-            i_pre = (i_pre,)
-        self.__dict__['i_pre'] = i_pre
+        self.__dict__['node'] = node
+        self.__dict__['box'] = box
+        # if idx != None and type(idx) != tuple:
+        #     idx = (idx,)
+        self.__dict__['idx'] = idx
     
     def __call__(self, *v, **k):
-        # print('z_node call', self.z_node, isinstance(self.z_node, tmethod))
-        if inspect.isfunction(self.z_node):
-            return self.z_node(*v, **k)
-        elif isinstance(self.z_node, tmethod):
-            if self.z_node.is_member:
-                return self.z_node(*v, tracept_self=self, **k)
-            else:
-                return self.z_node(*v, **k)
-        elif hasattr(self.z_node, '__call__'):
-            if isinstance(self.z_node.__call__, tmethod):
-                return self.z_node(*v, tracept_self=self, **k)
-            else:
-                raise ValueError('{} is a callable class but __call__ is not a tmethod'.format(self.z_node))
+        _callable = self.node
+        # print(v)
+        if inspect.isfunction(_callable):
+            return _callable(*v, **k)
+        # TODO: member funcs
+        # elif isinstance(_callable, tmethod):
+        #     if _callable.is_member:
+        #         return _callable(*v, tracept_self=self, **k)
+        #     else:
+        #         return _callable(*v, **k)
+        elif hasattr(_callable, '__call__'):
+            return getattr(type(_callable), '__call__')(self, *v, **k)
+            # if isinstance(_callable.__call__, tmethod):
+            #     return _callable(*v, tracept_self=self, **k)
+            # else:
+            #     raise ValueError('{} is a callable class but __call__ is not a tmethod'.format(_callable))
         else:
-            raise ValueError('{} was called but is not a function, tmethod, or callable class'.format(self.z_node))
+            raise ValueError('{} was called but is not a function, tmethod, or callable class'.format(_callable))
 
     def __getattr__(self, name):
-        # value = self.z_node.__dict__[name]
-        value = getattr(self.z_node, name) # Get value or function from actual z object
-        if type(value) is DynamicsMap:
+        value = getattr(self.node, name) # Get value or function from actual z object
+        if type(value) is MutableID:
             # TODO: to support in place slice assignments, have to wrap in something new
-            return self.z_box.getz(value.I, i_pre=self.i_pre) # self.z_box.z_dyn[self.i_t,...,value.I]
-        elif is_dataclass(type(value)):
-            return TWrapper(self.z_box, value, is_root=False, i_pre=self.i_pre)
-        elif callable(value):
-            return partial(value, tracept_self=self)
+            return self.box.get_mut(value, idx=self.idx)
+        elif is_dataclass(type(value)) or callable(value):
+            return TWrapper(value, self.box, is_root=False, idx=self.idx)
+        # elif callable(value):
+        #     return partial(value, tracept_self=self)
         elif type(value) in [list, tuple, dict]:
-            return self.Iterable(self.z_box, value, self.i_pre)
+            return self.Iterable(value, self.box, self.idx)
         else:
             return value
     
     def __setattr__(self, name, value):
-        z_leaf = self.z_node.__dict__[name]
-        if type(z_leaf) is DynamicsMap:
-            # self.z_box.z_dyn = self.z_box.z_dyn.at[self.i_t,...,z_leaf.I].set(value)
-            self.z_box.setz(z_leaf.I, value, i_pre=self.i_pre)
+        leaf = getattr(self.node, name)
+        if type(leaf) is MutableID:
+            self.box.set_mut(leaf, value, idx=self.idx)
         else:
-            raise ValueError('{} isn\'t mutable; all mutable states must be stored as a DynamicsMap'.format(name))
+            raise ValueError('{} isn\'t mutable; all mutable states must be stored as a MutableID (generated from a Mutable)'.format(name))
 
-    def __getitem__(self, i_pre):
-        return TWrapper(self.z_box, self.z_node, is_root=False, i_pre=i_pre)
+    def __getitem__(self, idx):
+        if type(idx) is not tuple: idx = (idx,)
+        if type(idx[0]) is str: # Labeled access
+            # if len(idx) != 2 or type(idx[1]) is not int:
+            #     raise ValueError('Only (str, int) is allowed for labeled access')
+            mut_ids = self.box.meta.labeled_mut_ids[idx[0]]
+            if len(idx) == 1:
+                return [self.box.get_mut(mid, self.idx) for mid in mut_ids]
+            elif type(idx[1]) is int:
+                return self.box.get_mut(mut_ids[idx[1]], self.idx)
+        else:
+            if self.idx != None:
+                idx = ((self.idx,) if type(self.idx)!=tuple else self.idx) + ((idx,) if type(idx)!=tuple else idx)
+            return TWrapper(self.node, self.box, is_root=False, idx=idx)
+
+    def __setitem__(self, idx, value):
+        if type(idx) is not tuple: idx = (idx,)
+        if type(idx[0]) is str: # Labeled access
+            # if len(idx) != 2 or type(idx[1]) is not int:
+            #    raise ValueError('Only (str, int) is allowed for labeled writes')
+            mut_ids = self.box.meta.labeled_mut_ids[idx[0]]
+            if len(idx) == 1:
+                for i, mid in enumerate(mut_ids):
+                    self.box.set_mut(mid, value[i], self.idx)
+            elif type(idx[1]) is int:
+                self.box.set_mut(mut_ids[idx[1]], value, self.idx)
 
     def lerp(self, ts: float, t: jtp.ArrayLike):
         i1 = jnp.clip(jnp.searchsorted(t, ts, side='right'), 1, len(t) - 1)
         l  = jnp.clip((ts - t[i1-1])/(t[i1] - t[i1-1]), 0.0, 1.0)
-        return TWrapper.LerpWrapper(self.z_box, self.z_node, i1, l)
+        return TWrapper.LerpWrapper(self.node, self.box, i1, l) # TODO: idx
 
     # TODO: repr for tree structure only, dynamic only, and static only, no children ie ...
     def __format__(self, spec):
-        fields = get_fields(type(self.z_node))
-        fields_repr = type(self.z_node).__name__ + '( '
-        do_dyn, do_leaves, do_subclasses = False, False, False
+        fields = get_fields(type(self.node))
+        fields_repr = type(self.node).__name__ + '( '
+        do_mut, do_leaves, do_subclasses = False, False, False
         for s in spec:
             match s:
-                case 'd': do_dyn = True
+                case 'm': do_dmut = True
                 case 'l': do_leaves = True
                 case 't': do_subclasses = True
-                case _: raise ValueError('"{s}" is not a recognized format specifier, use "t" to show tclasses, "d" to show dynamics (and derivatives), and/or "l" to show other leaves'.format(s))
+                case _: raise ValueError('"{s}" is not a recognized format specifier, use "t" to show tclasses, "m" to show mutables, and/or "l" to show other leaves'.format(s))
 
         for field in fields:
-            value = getattr(self.z_node, field.name)
+            value = getattr(self.node, field.name)
             if is_dataclass(type(value)): # TODO: assumed t class, allow others?
                 if do_subclasses:
-                    fields_repr += ('{}={:'+spec+'}, ').format(field.name, TWrapper(self.z_box, value, is_root=False, i_pre=self.i_pre))
-            elif type(value) is DynamicsMap:
-                if do_dyn:
-                    fields_repr += '{}={}, '.format(field.name, np.array2string(self.z_box.getz(value.I, i_pre=self.i_pre), max_line_width=1000))
+                    fields_repr += ('{}={:'+spec+'}, ').format(field.name, TWrapper(value, self.box, is_root=False, idx=self.idx))
+            elif type(value) is MutableID:
+                if do_mut:
+                    fields_repr += '{}={}, '.format(field.name, np.array2string(self.box.get_mut(value, idx=self.idx), max_line_width=1000))
             else:
                 if do_leaves:
                     fields_repr += '{}={}, '.format(field.name, value)
         return fields_repr + " )"
 
     def __repr__(self):
-        return self.__format__('dlt')
+        return self.__format__('mlt')
 
-# Tracept function decorator
-# Static functions can be called from anywhere and take and return only z
-# Member functions are only called from tracept static functions and can take and return anything
-# def tmethod(func=None, *, z_out=None):
-class tmethod:
-    def __init__(self, func=None):#, *, z_out=None):
-        self.is_pre_deco = func == None
-        # self.z_out = z_out
-        # TODO: specific locked attribs (no read or write)?
-            # TODO: way to do separate containers for a set of active variables? could speed up things like pont solver a lot
-        if not self.is_pre_deco:
-            self.func = func
-            param_names = inspect.signature(func).parameters
-            self.is_member = len(param_names) > 0 and next(iter(param_names)) == 'self'
-            # self.z
-
-            # print('new tmethod', func, inspect.signature(func).parameters[0], inspect.ismethod(func), inspect.isfunction(func))
-            # @functools.wraps(func) # TODO: retain signature
-
-    # Users should call with z, internal state managers like integrators should call with z_dyn and z
-    def __call__(self, *vargs, **kwargs):
-        if self.is_pre_deco:
-            if len(vargs) != 1 or len(kwargs) != 0:
-                raise RuntimeError('If arguments are provided to tmethod during decoration then further args are not allowed')
-            return tmethod(vargs[0], z_out=self.z_out)
-
-        if self.is_member:
-            if not 'tracept_self' in kwargs:
-                raise ValueError('Tracept member functions must be called from within a Tracept static function as part of wrapped z')
-            # TODO: allow any return?
-            # if 'z' in kwargs:
-                # return func(kwargs['tracept_self'], *vargs[1:], z=kwargs['z'])
-            # else:
-                # return func(kwargs['tracept_self'], *vargs[1:])
-            tracept_self = kwargs['tracept_self']
-            del kwargs['tracept_self']
-            return self.func(tracept_self, *vargs, **kwargs)
-        else:
-            if 'z_tree' in kwargs:
-                result = self.func(z=TWrapper(kwargs['z_dyn'], kwargs['z_tree'], is_root=True))
-                # TODO: allow other return values along with z?
-                # if self.z_out:
-                if isinstance(result, TWrapper):
-                    result = result.z_box.z_dyn
-            elif 'z' in kwargs:
-                # If given a TWrapper, know this is nested call and don't intervene
-                # TODO: allow generic return if nested static? take root flag for clarity?
-                result = self.func(z=kwargs['z'])
-            else:
-                raise ValueError('tmethods must be called with either wrapped z kwarg or both z_tree and z_dyn kwargs')
-            return result
-
-def bake_list(z_list, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults):
-    for z_item in z_list:
-        if is_dataclass(type(z_item)):
-            z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults = bake_branch(z_item, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults)
-        elif type(z_item) in [Dynamic, Derivative]:
-            raise TypeError('{} not supported'.format(type(z_item)))
-        #     raise TypeError('not supported')
-        # elif type(z_item) is Derivative:
-        #     raise TypeError('not supported')
-        # elif type(z_item) is Placeholder:
-        #     raise TypeError('not supported')
-        # else:
-        #     raise TypeError('{} not supported'.format(type(z_item)))
-            # raise ValueError('Field {} of {} was unset, stored error message: {}'.format(field.name, type(z_branch), value.error_message))
+def bake_list(node_list, meta):
+    for node in node_list:
+        if is_dataclass(type(node)):
+            bake_branch(node, meta)
+        elif isinstance(node, Mutable):
+            # TODO: error if __bake__?
+            # mid = meta.append(node) # can't replace if dict without further mods...
+            raise TypeError('{} not supported'.format(type(node)))
         # Can be static variable, leave it alone
-    
-    return z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults
 
-def add_label_I(label: str, I: jax.Array, labels_I: list):
-    if label not in labels_I:
-        labels_I[label] = []
-    labels_I[label].append(I)
-    
-    return labels_I
-
-def bake_branch(z_branch, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults):
-    if is_dataclass(type(z_branch)):
-        fields = get_fields(z_branch)
-    elif type(z_branch) is list or type(z_branch) is tuple:
-        return bake_list(z_branch, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults)
-    elif type(z_branch) is dict:
-        return bake_list(z_branch.values(), z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults)
+def bake_branch(branch, meta):
+    if is_dataclass(type(branch)):
+        fields = get_fields(branch)
+    elif type(branch) in [list, tuple]:
+        return bake_list(branch, meta)
+    elif type(branch) is dict:
+        return bake_list(branch.values(), meta)
     else:
-        raise TypeError('Unrecognized z branch type {}'.format(type(z_branch)))
+        raise TypeError('Unrecognized branch type {}'.format(type(branch)))
     
-    dmap = { }
+    # Begin by finding all Mutables and calling any pre_bake functions
+    mut_nodes = {}
     for field in fields:
-        z_item = getattr(z_branch, field.name)
-        # print(field.name, value)
-        if type(field.type) is Dynamic or field.type is Dynamic: # Both type or instance as type are supported
-            desc = z_item if type(z_item) is Dynamic else (field.type if type(field.type) is Dynamic else Dynamic())
-            I = z_ptr + jnp.arange(desc.N).reshape(desc.shape)
-            for label in desc.labels: # Record indices to dynamic variable with its labels
-                add_label_I(label, I, labels_I)
-            setattr(z_branch, field.name, DynamicsMap(I))
-            default = z_item.default if (type(z_item) is Dynamic) else z_item
-            if default is not None: # TODO: factor too?
-                # print('DEFAULT', field.name, z_item.default)
-                defaults.append((I, default))
-            z_ptr += desc.N
-        elif type(field.type) is Derivative:
-            dmap[field.type.field_name] = field.name # map is from a fields's name to it's derivative's name
-        elif is_dataclass(type(z_item)) or type(z_item) in [list, tuple, dict]:
-            # print('Processing child branch', field.name)
-            z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults = bake_branch(z_item, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults)
-        # if type(z_item) is Dynamic:
-        #     # print('Setting dynamic', field.name)
-        #     I = z_ptr + jnp.arange(z_item.N).reshape(z_item.shape)
-        #     for label in z_item.labels: # Record indices to dynamic variable with its labels
-        #         add_label_I(label, I, labels_I)
-        #     setattr(z_branch, field.name, DynamicsMap(I))
-        #     if z_item.default is not None:
-        #         defaults.append((I, z_item.default))
-        #     z_ptr += z_item.N
-        # elif type(z_item) is Derivative:
-        #     dmap[z_item.field_name] = field.name # map is from a fields's name to it's derivative's name
-        # elif is_dataclass(type(z_item)) or type(z_item) in [list, tuple, dict]:
-        #     # print('Processing child branch', field.name)
-        #     z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults = bake_branch(z_item, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults)
-        # elif type(z_item) is Placeholder:
-        #     raise ValueError('Field {} of {} was unset, stored error message: {}'.format(field.name, type(z_branch), z_item.error_message))
-    
-    # Set derivative's dynamic maps last, assumes higher order derivatives were declared in accending order
-    for value_name, deriv_name in dmap.items():
-        value_zmap = getattr(z_branch, value_name)
-        if not type(value_zmap) is DynamicsMap:
-            raise ValueError('Derivative variable {} in {} points to a {}, which should have started as a Dynamic or Derivative field and now be a DynamicsMap; if it is a derivative of a derivative, it should be declared after'.format(deriv_name, value_name, type(value_zmap)))
-        I = z_ptr + jnp.arange(value_zmap.I.size).reshape(value_zmap.I.shape)
-        # TODO: support?
-        # deriv_item = getattr(z_branch, deriv_name)
-        # for label in deriv_item.labels: # Record indices to dynamic variable with its labels
-        #     add_label_I(label, I, labels_I)
-        setattr(z_branch, deriv_name, DynamicsMap(I))
-        z_ptr += value_zmap.I.size
-    
-    dmap_z_I  += [getattr(z_branch,value_name).I.ravel() for value_name in dmap.keys()]
-    dmap_dz_I += [getattr(z_branch,deriv_name).I.ravel() for deriv_name in dmap.values()]
-    
-    return z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults
+        node = getattr(branch, field.name)
 
-# TODO: pass this around during init instead of pieces...
-@dataclass
-# class TBakedPytree:
-class TMetaPytree:
-    z_tree: Any
-    N_dyn: int
-    dmap_z_I: jax.Array #: index array (into underlying array) to all dynamic values with a corresponding derivative
-    dmap_dz_I: jax.Array #: index array (into underlying array) to all derivative values
-    labels_I: dict[str, list[jax.Array]] #: for each label, a list of index arrays (into underlying array)
-    defaults: list[tuple[jax.Array, jtp.ArrayLike]] #: index arrays into underlying array to a broadcastable default
+        # print(field.name, node)
+        # print(isinstance(node, Mutable) , isinstance(field.type, Mutable) , isinstance(field.type, type) and issubclass(field.type, Mutable))
+        # Ensure either the value is Mutable or the dataclass type is Mutable (via either raw type or instance as type)
+        if isinstance(node, Mutable) or isinstance(field.type, Mutable) or (isinstance(field.type, type) and issubclass(field.type, Mutable)):
+            desc = node if isinstance(node, Mutable) else (field.type if isinstance(field.type, Mutable) else Mutable())
+            bake_func = getattr(desc, '__pre_bake__', None)
+            if bake_func is not None:
+                bake_func(branch, mut_nodes)
+            mut_nodes[field.name] = (desc, node if not isinstance(node, Mutable) else desc.default)
+    # Place MutableIDs at all Mutable fields
+    for name, (desc, default) in mut_nodes.items():
+        setattr(branch, name, meta.append(desc, default))
+    # Bake children
+    for field in fields:
+        node = getattr(branch, field.name)
+        if is_dataclass(type(node)) or type(node) in [list, tuple, dict]:
+            bake_branch(node, meta)
 
-# TODO: should we really be modifying z_tree?
-def bake_tree(z_tree):
-    """
-    This WILL MODIFY z_tree
-    User of lables_I will see a list of jax index arrays, i.e. separate variables, without their names
-    """
-    z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults = bake_branch(z_tree, z_ptr=0, dmap_z_I=[], dmap_dz_I=[], labels_I={}, defaults=[])
-    
-    # Create arrays to be used in time stepping like z_dyn[...,dmap_z_I] += dt*z_dyn[...,dmap_dz_I])
-    if len(dmap_z_I) > 0:
-        dmap_z_I  = jnp.concatenate(dmap_z_I)
-        dmap_dz_I = jnp.concatenate(dmap_dz_I)
-    else:
-        dmap_z_I  = jnp.zeros(0)
-        dmap_dz_I = jnp.zeros(0)
-    # for label, label_I in labels_I.items():
-        # labels_I[label] = jnp.concatenate(label_I)
-
-    # return TBakedPytree(z_tree, z_ptr, dmap_z_I, dmap_dz_I, labels_I, defaults)
-    return { 'z_tree': z_tree, 'N_dyn': z_ptr, 'dmap_z_I': dmap_z_I, 'dmap_dz_I': dmap_dz_I, 'labels_I': labels_I, 'defaults': defaults }
-
-# TODO: removing support because not annotated so can't dyn as a branch
-# # Preprocess component classes into an aggregate z usable in Tracept functions, create shared dynamic array while filling z with its index maps, and resolve derivative relationships
-# def bake_trees(**z_branches):
-#     return bake_tree(tclass(make_dataclass('_GeneratedZ', [subclass_name for subclass_name in z_branches]))(**z_branches))
-
-# TODO: what about a metaclass for tclasses so regular __init__ bakes it? not much overhead and uncommon to non-copy instantiate without changing anything static
-
-def fill(z_meta, shape=(), jittable=False) -> TWrapper:
-    """New state with all dynamic states to their specified default, 0.0 for each unspecified
-    """
-    if type(shape) is int:
-        shape = (shape,)
-    if jittable:
-        z = jnp.zeros(shape+(z_meta['N_dyn'],))
-        for I, default in z_meta['defaults']:
-            z = z.at[...,I].set(default)
-    else:
-        z = np.zeros(shape+(z_meta['N_dyn'],))
-        for I, default in z_meta['defaults']:
-            z[...,I] = default
-        z = jnp.array(z)
-
-    return TWrapper(z, z_meta['z_tree'], is_root=True)
-
-# TODO: allow copy of children? would need reverse index lookup
-def copy(z: TWrapper) -> TWrapper:
-    """Copy an instance (from fill or instantiate) of an entire Tracept tree.
-    
-    z must be the root (i.e. z not z.child) but can be indexed (i.e. z[0] is ok), in which case only the slice of the underlying array will be copied.
-
-    Args:
-      z A tracept instance root.
-    """
-    if not z.is_root:
-        raise ValueError('Can only copy the z_tree from the root')
-    new_z_dyn = jnp.copy(z.z_box.z_dyn if z.i_pre == None else z.z_box.z_dyn[i_pre])
-    return TWrapper(jnp.copy(z.z_box.z_dyn), is_root=True)
-
-# TODO: doesn't work with odes unless store the meta, which should be free since JAX only sees underlying tree but not the wrapper
-def instantiate(z_tree, shape=()):
-    """Create a usable instance of a Tracept tree, equivalent to bake then fill.
-
-    Calling bake once then fill multiple times is recommended if multiple instances are to be created of the same Tracept tree and usage of defaults is desired.
-    However, if copies are suitable, then instantiate then copy is liekly more convenient and efficient.
-    """
-    return fill(bake_tree(z_tree), shape)
+def fresh(twp, batch_shape=()):
+    if type(batch_shape) is not tuple: batch_shape = (batch_shape,)
+    meta = twp.box.meta
+    return TWrapper(twp.node, TWrapper.Box(meta.new_muts(batch_shape), meta))
