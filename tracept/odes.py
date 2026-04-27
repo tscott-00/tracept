@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import jax.typing as jtp
 
 from tracept import Mutable
-from tracept.core import TWrapper
+from tracept.core import Wrapper, Box
 
 class Derivative(Mutable):
     """A mutable that represents the derivative of another"""
@@ -40,7 +40,7 @@ def step_fe(twp, dt):
     #       just put labeled tutorial and make clear this does not give a reference
 
 def update_and_record(i, tin, meta, muts, mut_stacks):
-    twp = TWrapper(tin, TWrapper.Box(muts, meta))
+    twp = Wrapper(tin, Box(muts, meta))
     twp()
     # print(mut_stacks[0].shape, twp.box.muts[0].shape)
     mut_stacks = [mut_stack.at[i,...].set(mut) for mut_stack, mut in zip(mut_stacks, twp.box.muts)]
@@ -77,7 +77,7 @@ def make_integrator(fstep):
     _integrator_step = jax.jit(partial(integrator_step, fstep=fstep))
     
     def _integrator(twp0, dt, T, _integrator_step=_integrator_step):
-        if type(twp0) is TWrapper:
+        if type(twp0) is Wrapper:
             tin, box = twp0.node, twp0.box
             muts0, meta = box.muts, box.meta
             if len(muts0) == 0: raise TypeError('Cannot integrate a type with no mutable variables')
@@ -95,6 +95,6 @@ def make_integrator(fstep):
         # Final state in general only has independent variables at final time after exiting integrator, call dynamics once more to update to full state at final time
         _, mut_stacks = update_and_record(-1, tin, meta, muts, mut_stacks)
         
-        return t, TWrapper(tin, TWrapper.Box(mut_stacks, meta))
+        return t, Wrapper(tin, Box(mut_stacks, meta))
     
     return _integrator

@@ -18,7 +18,7 @@ import jax.typing as jtp
 
 # TODO: make clear what limitations on calling are - can wrap inside jit when jitting then remake outside, but is it good to return wrapper and have JAX pytree it?
 #       issue is can't use the wrapper we entered with since immutable jax pytree... JIT needs to only see the pieces
-#       #1: jit sees tmethod, takes in jax pytree TWrapper, take appart the jaxed static list into a python list, give mutable version to actual function during compilation
+#       #1: jit sees tmethod, takes in jax pytree Wrapper, take appart the jaxed static list into a python list, give mutable version to actual function during compilation
 #       #2: custom jit takes in vanilla twrap, unpacks, passes to jax jitted wrap func that repacks sends to actual f, unpacks and returns out of jit, then it is repacked
 
 # TODO: test on 0 muts
@@ -39,13 +39,13 @@ class Tracept(type):
         else:
             tin.__is_baked__ = True
             # Bake it, i.e. build meta describing all Mutable
-            meta = TWrapper.Meta()
+            meta = Meta()
             bake_branch(tin, meta)
             
             if type(batch_shape) is int:
                 batch_shape = (batch_shape,)
 
-            return TWrapper(tin, TWrapper.Box(meta.new_muts(batch_shape), meta), is_root=True)
+            return Wrapper(tin, Box(meta.new_muts(batch_shape), meta), is_root=True)
 
 # TODO: in other file
 class jit:
@@ -70,7 +70,7 @@ class jit:
                 args = list(v) + list(k.values())
                 targ_info, muts, rarg_I, rargs = [], [], [], []
                 for i, arg in enumerate(args):
-                    if type(arg) is TWrapper:
+                    if type(arg) is Wrapper:
                         muts += arg.box.muts
                         targ_info.append((i, len(muts), arg.node, arg.box.meta))
                     else:
@@ -81,7 +81,7 @@ class jit:
                     args = [None]*N_args
                     ptr_mut = 0
                     for i, N_mut, tin, meta in targ_info:
-                        args[i] = TWrapper(tin, TWrapper.Box(muts[ptr_mut:ptr_mut+N_mut], meta))
+                        args[i] = Wrapper(tin, Box(muts[ptr_mut:ptr_mut+N_mut], meta))
                         ptr_mut += N_mut
                     for i, rarg in zip(rarg_I, rargs):
                         args[i] = rargs
@@ -137,13 +137,13 @@ class jit:
 #         else:
 #             # TODO: how does jax deal with the io? should we 
 #             if 'z_tree' in kwargs:
-#                 result = self.func(z=TWrapper(kwargs['z_dyn'], kwargs['z_tree'], is_root=True))
+#                 result = self.func(z=Wrapper(kwargs['z_dyn'], kwargs['z_tree'], is_root=True))
 #                 # TODO: allow other return values along with z?
 #                 # if self.z_out:
-#                 if isinstance(result, TWrapper):
+#                 if isinstance(result, Wrapper):
 #                     result = result.z_box.z_dyn
 #             elif 'z' in kwargs:
-#                 # If given a TWrapper, know this is nested call and don't intervene
+#                 # If given a Wrapper, know this is nested call and don't intervene
 #                 # TODO: allow generic return if nested static? take root flag for clarity?
 #                 result = self.func(z=kwargs['z'])
 #             else:
@@ -209,9 +209,75 @@ class MutableID:
     def __lt__(self, other): return self.i < other.i
     def __hash__(self): return hash(self.i)
 
+# TODO: only labeled_mut_ids is needed during runtime... and MutableID needs to be static to use as index the way i do
+@partial(jax.tree_util.register_dataclass, data_fields=['mut_shapes', 'labeled_mut_ids', 'defaults'], meta_fields=[])
+@dataclass
+class Meta:
+    # batch_shape:     tuple[int]
+    mut_shapes:      list[tuple[int]]               = field(default_factory=lambda:[])
+    labeled_mut_ids: dict[str, list[MutableID]]     = field(default_factory=lambda:{}) #: for each label, a list of identifiers
+    defaults:        dict[MutableID, jtp.ArrayLike] = field(default_factory=lambda:{}) #: index arrays into underlying array to a broadcastable default
+    #run: RuntimeMeta
+
+    def append(self, mut: Mutable, default: jtp.ArrayLike) -> MutableID:
+        """
+        Args:
+            mut the specificier for the mutable variable
+            val the default value to use, user may choose to just pass in mut.default
+        Returns:
+            mid identifier used to obtain the mutable's value in the future
+        """
+        mid = MutableID(len(self.mut_shapes))
+        self.mut_shapes.append(mut.shape)
+        for label in mut.labels:
+            if label not in self.labeled_mut_ids:
+                self.labeled_mut_ids[label] = []
+            self.labeled_mut_ids[label].append(mid)
+
+        if default is None:
+            default = mut.default
+        if default is not None: # TODO: factor too?
+            self.defaults[mid] = default
+        
+        return mid
+
+    def new_muts(self, batch_shape: tuple) -> tuple[jax.Array]:
+        """
+        Args:
+            batch_shape the shape to prepend to all mutable shapes 
+        Returns:
+            muts The arrays to store mutable data
+        """
+        # print('new muts', batch_shape, self.mut_shapes)
+        # print(batch_shape+self.mut_shapes[0], )
+        muts = [jnp.zeros(batch_shape+shape) for shape in self.mut_shapes]
+        # print(muts[0].shape)
+        for mid, default in self.defaults.items():
+            muts[mid.i] = muts[mid.i].at[...].set(default)
+
+        return muts
+
+# Shared container to keep track of mutating z_dyn, subclass so it can be used in other wrappers easily
+@dataclass
+class Box:
+    muts: list[jax.Array]
+    meta: Meta
+    batch_shape: tuple = None
+
+    def __post_init__(self):
+        if len(self.meta.mut_shapes) > 0: # Leave batch_shape as None if there are no mutables
+            N_test = len(self.meta.mut_shapes[0])
+            self.batch_shape = self.muts[0].shape[:-N_test] if N_test > 0 else self.muts[0].shape
+
+    def get_mut(self, mid, idx = ...):
+        return self.muts[mid.i][idx]
+    
+    def set_mut(self, mid, value, idx = ...):
+        self.muts[mid.i] = self.muts[mid.i].at[idx].set(value)
+
 NO_IDX = '' # Don't want to use None as that is valid for broadcasting and ... causes it to index last
 
-class TWrapper:
+class Wrapper:
     class Iterable:
         @dataclass
         class Iterator:
@@ -230,12 +296,12 @@ class TWrapper:
         def wrap(self, value):
             # TODO: if support dynamic in init, support DynamicsMap here...
             if is_dataclass(type(value)):
-                return TWrapper(value, self.box, is_root=False, idx=self.idx)
+                return Wrapper(value, self.box, is_root=False, idx=self.idx)
             elif callable(value):
-                return TWrapper(value, self.box, is_root=False, idx=self.idx)
+                return Wrapper(value, self.box, is_root=False, idx=self.idx)
                 # raise ValueError('Collections of functions not supported, may later support static functions')
             elif type(value) in [list, tuple, dict]:
-                return TWrapper.Iterable(value, self.box, self.idx)
+                return Wrapper.Iterable(value, self.box, self.idx)
             else:
                 return value
         
@@ -266,7 +332,7 @@ class TWrapper:
             if type(value) is MutableID:
                 return self.box.get_mut(value, idx=(self.i1_pre-1,))*(1-self.l_pre) + self.box.get_mut(value, idx=(self.i1_pre,))*self.l_pre
             elif is_dataclass(type(value)):
-                return TWrapper.LerpWrapper(value, self.box, self.i1_pre, self.l_pre)
+                return Wrapper.LerpWrapper(value, self.box, self.i1_pre, self.l_pre)
             elif type(value) in [list, tuple, dict]:
                 raise ValueError('Upcoming feature') # TODO: need another? or just test in wrap?
             else:
@@ -295,80 +361,11 @@ class TWrapper:
     #     def __lt__(self, other): return self.aval._lt(self, other)
     #     def __bool__(self): return self.aval._bool(self)
     #     def __nonzero__(self): return self.aval._nonzero(self)
-
-    # TODO: pass this around during init instead of pieces...
-    # TODO: only labeled_mut_ids is needed during runtime... and MutableID needs to be static to use as index the way i do
-    @partial(jax.tree_util.register_dataclass, data_fields=['mut_shapes', 'labeled_mut_ids', 'defaults'], meta_fields=[])
-    @dataclass
-    class Meta:
-        # batch_shape:     tuple[int]
-        mut_shapes:      list[tuple[int]]               = field(default_factory=lambda:[])
-        labeled_mut_ids: dict[str, list[MutableID]]     = field(default_factory=lambda:{}) #: for each label, a list of identifiers
-        defaults:        dict[MutableID, jtp.ArrayLike] = field(default_factory=lambda:{}) #: index arrays into underlying array to a broadcastable default
-        #run: RuntimeMeta
-
-        def append(self, mut: Mutable, default: jtp.ArrayLike) -> MutableID:
-            """
-            Args:
-              mut the specificier for the mutable variable
-              val the default value to use, user may choose to just pass in mut.default
-            Returns:
-              mid identifier used to obtain the mutable's value in the future
-            """
-            mid = MutableID(len(self.mut_shapes))
-            self.mut_shapes.append(mut.shape)
-            for label in mut.labels:
-                if label not in self.labeled_mut_ids:
-                    self.labeled_mut_ids[label] = []
-                self.labeled_mut_ids[label].append(mid)
-
-            if default is None:
-                default = mut.default
-            if default is not None: # TODO: factor too?
-                self.defaults[mid] = default
-            
-            return mid
-
-        def new_muts(self, batch_shape: tuple) -> tuple[jax.Array]:
-            """
-            Args:
-              batch_shape the shape to prepend to all mutable shapes 
-            Returns:
-              muts The arrays to store mutable data
-            """
-            # print('new muts', batch_shape, self.mut_shapes)
-            # print(batch_shape+self.mut_shapes[0], )
-            muts = [jnp.zeros(batch_shape+shape) for shape in self.mut_shapes]
-            # print(muts[0].shape)
-            for mid, default in self.defaults.items():
-                muts[mid.i] = muts[mid.i].at[...].set(default)
-
-            return muts
-
-    # Shared container to keep track of mutating z_dyn, subclass so it can be used in other wrappers easily
-    @dataclass
-    class Box:
-        muts: list[jax.Array]
-        meta: TWrapper.Meta
-        batch_shape: tuple = None
-
-        def __post_init__(self):
-            if len(self.meta.mut_shapes) > 0: # Leave batch_shape as None if there are no mutables
-                N_test = len(self.meta.mut_shapes[0])
-                self.batch_shape = self.muts[0].shape[:-N_test] if N_test > 0 else self.muts[0].shape
-
-        def get_mut(self, mid, idx = ...):
-            return self.muts[mid.i][idx]
-        
-        def set_mut(self, mid, value, idx = ...):
-            self.muts[mid.i] = self.muts[mid.i].at[idx].set(value)
     
-    def __init__(self, node, box: TWrapper.Box, is_root: bool = True, idx=NO_IDX):
+    def __init__(self, node, box: Box, is_root: bool = True, idx: tuple = NO_IDX):
         # Use __dict__ when initializing to avoid __setattr__
         self.__dict__['node'] = node
         self.__dict__['box'] = box
-        # if idx != None and type(idx) != tuple:
-        #     idx = (idx,)
         self.__dict__['_idx'] = idx
 
     @property
@@ -402,7 +399,7 @@ class TWrapper:
             # TODO: to support in place slice assignments, have to wrap in something new
             return self.box.get_mut(value, idx=self.idx)
         elif is_dataclass(type(value)) or callable(value):
-            return TWrapper(value, self.box, is_root=False, idx=self.idx)
+            return Wrapper(value, self.box, is_root=False, idx=self.idx)
         # elif callable(value):
         #     return partial(value, tracept_self=self)
         elif type(value) in [list, tuple, dict]:
@@ -430,7 +427,7 @@ class TWrapper:
         else:
             if self._idx is not NO_IDX:
                 idx = self._idx + idx
-            return TWrapper(self.node, self.box, is_root=False, idx=idx)
+            return Wrapper(self.node, self.box, is_root=False, idx=idx)
 
     def __setitem__(self, idx, value):
         if type(idx) is not tuple: idx = (idx,)
@@ -447,7 +444,7 @@ class TWrapper:
     def lerp(self, ts: float, t: jtp.ArrayLike):
         i1 = jnp.clip(jnp.searchsorted(t, ts, side='right'), 1, len(t) - 1)
         l  = jnp.clip((ts - t[i1-1])/(t[i1] - t[i1-1]), 0.0, 1.0)
-        return TWrapper.LerpWrapper(self.node, self.box, i1, l) # TODO: idx
+        return Wrapper.LerpWrapper(self.node, self.box, i1, l) # TODO: idx
 
     # TODO: repr for tree structure only, dynamic only, and static only, no children ie ...
     def __format__(self, spec):
@@ -468,7 +465,7 @@ class TWrapper:
                     fields_repr += '{}={}, '.format(field.name, np.array2string(self.box.get_mut(value, idx=self.idx), max_line_width=1000))
             elif is_dataclass(type(value)): # TODO: assumed t class, allow others?
                 if do_subclasses:
-                    fields_repr += ('{}={:'+spec+'}, ').format(field.name, TWrapper(value, self.box, is_root=False, idx=self.idx))
+                    fields_repr += ('{}={:'+spec+'}, ').format(field.name, Wrapper(value, self.box, is_root=False, idx=self.idx))
             elif field.name != '__is_baked__':
                 if do_leaves:
                     fields_repr += '{}={}, '.format(field.name, value)
@@ -517,7 +514,7 @@ def bake_branch(branch, meta):
     # Bake children
     for field in fields:
         node = getattr(branch, field.name)
-        if isinstance(node, TWrapper):
+        if isinstance(node, Wrapper):
             # Extract baked sub branch
             sub_branch, sub_meta = node.node, node.box.meta
             setattr(branch, field.name, sub_branch)
@@ -545,4 +542,4 @@ def bake_branch(branch, meta):
 def fresh(twp, batch_shape=()):
     if type(batch_shape) is not tuple: batch_shape = (batch_shape,)
     meta = twp.box.meta
-    return TWrapper(twp.node, TWrapper.Box(meta.new_muts(batch_shape), meta))
+    return Wrapper(twp.node, Box(meta.new_muts(batch_shape), meta))
