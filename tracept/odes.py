@@ -80,6 +80,7 @@ def make_integrator(fstep):
         if type(twp0) is TWrapper:
             tin, box = twp0.node, twp0.box
             muts0, meta = box.muts, box.meta
+            if len(muts0) == 0: raise TypeError('Cannot integrate a type with no mutable variables')
         else:
             raise TypeError('Must use an instance of a class created through the Tracepted metaclass.')
 

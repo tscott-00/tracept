@@ -1,1 +1,1 @@
-from .core import Tracepted, Mutable, fresh
+from .core import Tracept, Mutable, fresh

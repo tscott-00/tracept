@@ -24,10 +24,10 @@ import jax.typing as jtp
 # TODO: test on 0 muts
 # TODO: nested twrap
 
-class Tracepted(type):
+class Tracept(type):
     # TODO: tmethod all member funcs? they can all only be called from wrap now
-    def __new__(mcs, name, bases, dct):
-        return tclass(super().__new__(mcs, name, bases, dct))
+    def __new__(cls, name, bases, dct, **kwargs):
+        return tclass(super().__new__(cls, name, bases, dct), static_attrnames=kwargs.pop('static_attrnames', []))
 
     def __call__(cls, *args, batch_shape=(), **kwargs):
         # Create and initialize the underlying tclass instance
@@ -150,7 +150,7 @@ class jit:
 #                 raise ValueError('tmethods must be called with either wrapped z kwarg or both z_tree and z_dyn kwargs')
 #             return result
 
-# TODO: metaclass that does baking when init?
+# TODO: one modality
 def tclass(cls=None, *, static_attrnames=[]):
     """Decorator to create a Tracept class, enabling functionality mutable JIT OOP.
     All attributes of the class must be annotated in dataclass convention.
@@ -168,6 +168,7 @@ def tclass(cls=None, *, static_attrnames=[]):
         cls.__annotations__['__is_baked__'] = bool
         setattr(cls, '__is_baked__', False)
         static_attrnames = ['__is_baked__'] + static_attrnames
+        # TODO: allow non kw-only? pickle doesn't like pos dataclass args
         cls = dataclass(cls, kw_only=True) # Turn into dataclass
         fields = get_fields(cls) # Get fields (everything that was annotated)
         # TODO: Error if not annotated
@@ -205,7 +206,10 @@ class Mutable:
 class MutableID:
     i: int
 
+    def __lt__(self, other): return self.i < other.i
     def __hash__(self): return hash(self.i)
+
+NO_IDX = '' # Don't want to use None as that is valid for broadcasting and ... causes it to index last
 
 class TWrapper:
     class Iterable:
@@ -349,8 +353,9 @@ class TWrapper:
         batch_shape: tuple = None
 
         def __post_init__(self):
-            N_test = len(self.meta.mut_shapes[0])
-            self.batch_shape = self.muts[0].shape[:-N_test] if N_test > 0 else self.muts[0].shape
+            if len(self.meta.mut_shapes) > 0: # Leave batch_shape as None if there are no mutables
+                N_test = len(self.meta.mut_shapes[0])
+                self.batch_shape = self.muts[0].shape[:-N_test] if N_test > 0 else self.muts[0].shape
 
         def get_mut(self, mid, idx = ...):
             return self.muts[mid.i][idx]
@@ -358,13 +363,18 @@ class TWrapper:
         def set_mut(self, mid, value, idx = ...):
             self.muts[mid.i] = self.muts[mid.i].at[idx].set(value)
     
-    def __init__(self, node, box: TWrapper.Box, is_root: bool = True, idx=...):
+    def __init__(self, node, box: TWrapper.Box, is_root: bool = True, idx=NO_IDX):
         # Use __dict__ when initializing to avoid __setattr__
         self.__dict__['node'] = node
         self.__dict__['box'] = box
         # if idx != None and type(idx) != tuple:
         #     idx = (idx,)
-        self.__dict__['idx'] = idx
+        self.__dict__['_idx'] = idx
+
+    @property
+    def idx(self):
+        # Can't store ... in ._idx by default as don't want to prepend ... if user indices directly
+        return ... if self._idx is NO_IDX else self._idx
     
     def __call__(self, *v, **k):
         _callable = self.node
@@ -418,8 +428,8 @@ class TWrapper:
             elif type(idx[1]) is int:
                 return self.box.get_mut(mut_ids[idx[1]], self.idx)
         else:
-            if self.idx != None:
-                idx = ((self.idx,) if type(self.idx)!=tuple else self.idx) + ((idx,) if type(idx)!=tuple else idx)
+            if self._idx is not NO_IDX:
+                idx = self._idx + idx
             return TWrapper(self.node, self.box, is_root=False, idx=idx)
 
     def __setitem__(self, idx, value):
@@ -446,20 +456,20 @@ class TWrapper:
         do_mut, do_leaves, do_subclasses = False, False, False
         for s in spec:
             match s:
-                case 'm': do_dmut = True
+                case 'm': do_mut = True
                 case 'l': do_leaves = True
                 case 't': do_subclasses = True
                 case _: raise ValueError('"{s}" is not a recognized format specifier, use "t" to show tclasses, "m" to show mutables, and/or "l" to show other leaves'.format(s))
 
         for field in fields:
             value = getattr(self.node, field.name)
-            if is_dataclass(type(value)): # TODO: assumed t class, allow others?
-                if do_subclasses:
-                    fields_repr += ('{}={:'+spec+'}, ').format(field.name, TWrapper(value, self.box, is_root=False, idx=self.idx))
-            elif type(value) is MutableID:
+            if type(value) is MutableID:
                 if do_mut:
                     fields_repr += '{}={}, '.format(field.name, np.array2string(self.box.get_mut(value, idx=self.idx), max_line_width=1000))
-            else:
+            elif is_dataclass(type(value)): # TODO: assumed t class, allow others?
+                if do_subclasses:
+                    fields_repr += ('{}={:'+spec+'}, ').format(field.name, TWrapper(value, self.box, is_root=False, idx=self.idx))
+            elif field.name != '__is_baked__':
                 if do_leaves:
                     fields_repr += '{}={}, '.format(field.name, value)
         return fields_repr + " )"
@@ -507,7 +517,29 @@ def bake_branch(branch, meta):
     # Bake children
     for field in fields:
         node = getattr(branch, field.name)
-        if is_dataclass(type(node)) or type(node) in [list, tuple, dict]:
+        if isinstance(node, TWrapper):
+            # Extract baked sub branch
+            sub_branch, sub_meta = node.node, node.box.meta
+            setattr(branch, field.name, sub_branch)
+            # Append sub branch to our meta by offsetting each sub mid and carrying over defaults
+            mid_offset = len(meta.mut_shapes)
+            # print('node', type(sub_branch))
+            # print('before', sub_meta.defaults, mid_offset)
+            for sub_field in get_fields(sub_branch):
+                sub_node = getattr(sub_branch, sub_field.name)
+                # print('   sub_node', sub_field.name, sub_node)
+                if type(sub_node) is MutableID:
+                    sub_node.i += mid_offset
+                    # print(sub_node)
+            meta.mut_shapes += sub_meta.mut_shapes
+            # Note that the mids in sub_meta are references so the offset modified above is carried over
+            for label, mut_ids in sub_meta.labeled_mut_ids.items():
+                meta.labeled_mut_ids[label] = meta.labeled_mut_ids.get(label, []) + mut_ids
+            meta.defaults = {**meta.defaults, **sub_meta.defaults}
+            # print('after', meta.defaults)
+            # bake_branch(sub_branch, meta)
+        elif type(node) is not MutableID and is_dataclass(type(node)) or type(node) in [list, tuple, dict]:
+            # print('BAKING CHILD NODE', type(node))
             bake_branch(node, meta)
 
 def fresh(twp, batch_shape=()):
