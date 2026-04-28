@@ -204,17 +204,17 @@ class Mutable:
 @partial(jax.tree_util.register_dataclass, data_fields=[], meta_fields=['i'])
 @dataclass
 class MutableID:
-    i: int
+    i: int #: indexes the underlying tuple of mut
 
     def __lt__(self, other): return self.i < other.i
     def __hash__(self): return hash(self.i)
 
 # TODO: only labeled_mut_ids is needed during runtime... and MutableID needs to be static to use as index the way i do
-@partial(jax.tree_util.register_dataclass, data_fields=['mut_shapes', 'labeled_mut_ids', 'defaults'], meta_fields=[])
+@partial(jax.tree_util.register_dataclass, data_fields=['labeled_mut_ids', 'defaults'], meta_fields=['mut_shapes'])
 @dataclass
 class Meta:
     # batch_shape:     tuple[int]
-    mut_shapes:      list[tuple[int]]               = field(default_factory=lambda:[])
+    mut_shapes:      list[tuple[int]]               = field(default_factory=lambda:[]) #: base shape of each mutable
     labeled_mut_ids: dict[str, list[MutableID]]     = field(default_factory=lambda:{}) #: for each label, a list of identifiers
     defaults:        dict[MutableID, jtp.ArrayLike] = field(default_factory=lambda:{}) #: index arrays into underlying array to a broadcastable default
     #run: RuntimeMeta
@@ -447,15 +447,16 @@ class Wrapper:
 
     def ravel_get(self, label):
         mut_ids = self.box.meta.labeled_mut_ids[label]
-        return jnp.stack([jnp.reshape(self.box.get_mut(mid, self.idx), box.batch_shape+(-1,)) for mid in mut_ids], axis=-1)
+        return jnp.concatenate([jnp.reshape(self.box.get_mut(mid, self.idx), self.box.batch_shape+(-1,)) for mid in mut_ids], axis=-1)
 
     def ravel_set(self, label, values):
         mut_ids = self.box.meta.labeled_mut_ids[label]
         ptr = 0
         for i, mid in enumerate(mut_ids):
             old_mut = self.box.get_mut(mid, self.idx)
-            single_size = old_mut[]
-            self.box.set_mut(mid, jnp.reshape(values[...,ptr+old_mut], old_mut.shape), self.idx)
+            base_size = np.prod(self.box.meta.mut_shapes[mid.i], dtype=int)
+            self.box.set_mut(mid, jnp.reshape(values[...,ptr:ptr+base_size], old_mut.shape), self.idx)
+            ptr += base_size
 
     def lerp(self, ts: float, t: jtp.ArrayLike):
         i1 = jnp.clip(jnp.searchsorted(t, ts, side='right'), 1, len(t) - 1)
