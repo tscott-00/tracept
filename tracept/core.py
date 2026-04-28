@@ -375,7 +375,7 @@ class Wrapper:
     
     def __call__(self, *v, **k):
         _callable = self.node
-        # print(v)
+        # print('_callable', _callable)
         if inspect.isfunction(_callable):
             return _callable(*v, **k)
         # TODO: member funcs
@@ -384,6 +384,8 @@ class Wrapper:
         #         return _callable(*v, tracept_self=self, **k)
         #     else:
         #         return _callable(*v, **k)
+        # elif inspect.ismethod(_callable):
+        #     return 
         elif hasattr(_callable, '__call__'):
             return getattr(type(_callable), '__call__')(self, *v, **k)
             # if isinstance(_callable.__call__, tmethod):
@@ -398,6 +400,8 @@ class Wrapper:
         if type(value) is MutableID:
             # TODO: to support in place slice assignments, have to wrap in something new
             return self.box.get_mut(value, idx=self.idx)
+        elif inspect.ismethod(value): # Need to be able to override self so get from class here
+            return lambda *v, _self=self, _f=getattr(type(self.node),name), **k: _f(_self, *v, **k)
         elif is_dataclass(type(value)) or callable(value):
             return Wrapper(value, self.box, is_root=False, idx=self.idx)
         # elif callable(value):
@@ -440,6 +444,18 @@ class Wrapper:
                     self.box.set_mut(mid, value[i], self.idx)
             elif type(idx[1]) is int:
                 self.box.set_mut(mut_ids[idx[1]], value, self.idx)
+
+    def ravel_get(self, label):
+        mut_ids = self.box.meta.labeled_mut_ids[label]
+        return jnp.stack([jnp.reshape(self.box.get_mut(mid, self.idx), box.batch_shape+(-1,)) for mid in mut_ids], axis=-1)
+
+    def ravel_set(self, label, values):
+        mut_ids = self.box.meta.labeled_mut_ids[label]
+        ptr = 0
+        for i, mid in enumerate(mut_ids):
+            old_mut = self.box.get_mut(mid, self.idx)
+            single_size = old_mut[]
+            self.box.set_mut(mid, jnp.reshape(values[...,ptr+old_mut], old_mut.shape), self.idx)
 
     def lerp(self, ts: float, t: jtp.ArrayLike):
         i1 = jnp.clip(jnp.searchsorted(t, ts, side='right'), 1, len(t) - 1)

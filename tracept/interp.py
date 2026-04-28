@@ -21,8 +21,8 @@ def lerp(Xs: tuple[jtp.ArrayLike], X: tuple[jtp.ArrayLike], f: jtp.ArrayLike):
     D = len(Xs)
     I = [jnp.clip(jnp.searchsorted(X[j], Xs[j], side='right'), 1, len(X[j])-1) for j in range(D)]
     L = [jnp.clip((Xs[j] - X[j][I[j]-1]) / (X[j][I[j]] - X[j][I[j]-1]), 0.0, 1.0) for j in range(D)]
-    hypercube = -np.unravel_index(np.arange(2**D), [2]*D) # verts are index offsets, -1 or 0
-    return reduce(lambda a,b:a+b, [f[[verts[i] + I[i] for i in range(D)]] * reduce(lambda a,b:a*b, [1-l if verts[i]==-1 else l for i in range(D)]) for verts in hypercube])
+    verts = -np.array(np.unravel_index(np.arange(2**D), [2]*D)).T # (2**D, D) verts are index offsets, -1 or 0
+    return reduce(lambda a,b:a+b, [f[tuple([verts[v,i] + I[i] for i in range(D)])] * reduce(lambda a,b:a*b, [1-L[d] if verts[v,d]==-1 else L[d] for d in range(D)]) for v in range(verts.shape[0])])
 
 # # Time varing curves expressed as a linear combination of bases weighted by coeffs that may vary across MC samples
 # class LerpBases:
@@ -59,10 +59,11 @@ def lerp(Xs: tuple[jtp.ArrayLike], X: tuple[jtp.ArrayLike], f: jtp.ArrayLike):
 #     # def __class_getitem__(cls, N):
 #         # return partial(self.__init__, zmap=dict(coeffs = N))
 
+@partial(jax.tree_util.register_dataclass, data_fields=['array'], meta_fields=['inv_labels'])
 @dataclass
 class LabelWrapper:
     array: jtp.ArrayLike
-    inv_labels: dict[str,str]
+    inv_labels: dict[str,int]
     
     def __getitem__(self, label):
         return self.array[self.inv_labels[label]]
@@ -70,6 +71,7 @@ class LabelWrapper:
     def __getattr__(self, label):
         return self.array[self.inv_labels[label]]
 
+# TODO: kwarg constructor
 # TODO: could generalize via recursive function (no overhead once compiled)
 class LerpBox(metaclass=Tracept, static_attrnames=['inv_labels']):
     X: tuple[jtp.ArrayLike] # D arrays of size (Nx_i)
@@ -82,6 +84,8 @@ class LerpBox(metaclass=Tracept, static_attrnames=['inv_labels']):
 
     @classmethod
     def new(cls, X, f, labels=None):
+        if type(X) not in [list, tuple]: X = [X]
+
         # Check that entries are not too close
         for d, x in enumerate(X):
             if np.any(np.isclose(np.diff(x),0)):
