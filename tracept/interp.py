@@ -13,16 +13,98 @@ import jax.numpy as jnp
 import jax.typing as jtp
 
 from tracept import Tracept, Mutable
+from tracept.core import MutableID, NO_IDX
 
-# @partial(jax.jit, static_argnames='D')
-def lerp(Xs: tuple[jtp.ArrayLike], X: tuple[jtp.ArrayLike], f: jtp.ArrayLike):
+# def lerp(self, ts: float, t: jtp.ArrayLike):
+    #     i1 = jnp.clip(jnp.searchsorted(t, ts, side='right'), 1, len(t) - 1)
+    #     l  = jnp.clip((ts - t[i1-1])/(t[i1] - t[i1-1]), 0.0, 1.0)
+    #     return Wrapper.LerpWrapper(self.node, self.box, i1, l) # TODO: idx
+
+def lerp_iw(Xs: jtp.ArrayLike|tuple[jtp.ArrayLike], X: jtp.ArrayLike|tuple[jtp.ArrayLike], f: jtp.ArrayLike):
     if type(Xs) not in [tuple, list]: raise TypeError('Need tuple or list of Xs')
 
     D = len(Xs)
     I = [jnp.clip(jnp.searchsorted(X[j], Xs[j], side='right'), 1, len(X[j])-1) for j in range(D)]
     L = [jnp.clip((Xs[j] - X[j][I[j]-1]) / (X[j][I[j]] - X[j][I[j]-1]), 0.0, 1.0) for j in range(D)]
     verts = -np.array(np.unravel_index(np.arange(2**D), [2]*D)).T # (2**D, D) verts are index offsets, -1 or 0
-    return reduce(lambda a,b:a+b, [f[tuple([verts[v,i] + I[i] for i in range(D)])] * reduce(lambda a,b:a*b, [1-L[d] if verts[v,d]==-1 else L[d] for d in range(D)]) for v in range(verts.shape[0])])
+
+    return [
+        tuple([verts[v,i] + I[i] for i in range(D)]),
+        reduce(lambda a,b:a*b, [1-L[d] if verts[v,d]==-1 else L[d] for d in range(D)]) for v in range(verts.shape[0])
+    for v in range(verts.shape[0])]
+
+# @partial(jax.jit, static_argnames='D')
+def lerp(Xs: jtp.ArrayLike|tuple[jtp.ArrayLike], X: jtp.ArrayLike|tuple[jtp.ArrayLike], f: jtp.ArrayLike):
+    """
+    Args:
+      Xs inputs to sample at; Nx or [Nx_1, ..., Nx_D]
+      X  inputs to interpolate; same shape(s) as Xs
+      f  outputs to interpolate; (...)
+    Returns:
+      interpolated value 
+    """
+    iw = lerp_iw(Xs, X, f)
+    return reduce(lambda a,b:a+b, [w*f[i] for i, w in iw])
+
+# TODO: test
+def cerp(Xs: tuple, X: tuple, f: jnp.ndarray):
+    if type(Xs) not in [tuple, list]: raise TypeError('Need tuple or list of Xs')
+
+    D = len(Xs)
+    I = [jnp.clip(jnp.searchsorted(X[j], Xs[j], side='right'), 1, len(X[j])-1) for j in range(D)]
+    L = [jnp.clip((Xs[j] - X[j][I[j]-1]) / (X[j][I[j]] - X[j][I[j]-1]), 0.0, 1.0) for j in range(D)]
+    
+    # (4**D, D) verts are index offsets: -2, -1, 0, 1
+    verts = np.array(np.unravel_index(np.arange(4**D), [4]*D)).T - 2 
+    
+    # Catmull-Rom spline basis polynomials
+    def cubic_weight(t, v):
+        if v == -2: return -0.5 * t**3 + t**2 - 0.5 * t
+        if v == -1: return  1.5 * t**3 - 2.5 * t**2 + 1.0
+        if v ==  0: return -1.5 * t**3 + 2.0 * t**2 + 0.5 * t
+        if v ==  1: return  0.5 * t**3 - 0.5 * t**2
+
+    return reduce(lambda a,b:a+b, [
+        # Note the jnp.clip here to handle boundary stencils
+        f[tuple([jnp.clip(verts[v,i] + I[i], 0, len(X[i])-1) for i in range(D)])] * reduce(lambda a,b:a*b, [cubic_weight(L[d], verts[v,d]) for d in range(D)]) 
+        for v in range(verts.shape[0])
+    ])
+
+iw_kernels = {'lerp': lerp_iw}
+
+class InterpWrapper:
+    def __init__(self, node, box, idx: tuple, iw: list[tuple[tuple, float]]):
+        self.__dict__['node'] = node
+        self.__dict__['box'] = box
+        self.__dict__['idx'] = idx
+        self.__dict__['iw'] = iw
+
+    def __setattr__(self, name, value):
+        raise RuntimeError('Interpolation is for get access only')
+
+    def __getattr__(self, name):
+        value = getattr(self.node, name) # Get value or function from actual z object
+        if type(value) is MutableID:
+            m = self.box.get_mut(value,idx=self.idx)
+            return reduce(lambda a,b:a+b, [w*m[i] for i, w in iw])
+        elif is_dataclass(type(value)):
+            return Wrapper.LerpWrapper(value, self.box, self.idx, self.iw)
+        elif type(value) in [list, tuple, dict]:
+            raise ValueError('Upcoming feature') # TODO: need another? or just test in wrap?
+        else:
+            raise ValueError('Can only interpolate mutables')
+
+def interp_class(Xs: jtp.ArrayLike|tuple[jtp.ArrayLike], X: jtp.ArrayLike|tuple[jtp.ArrayLike], twp, interp_mode: str = 'lerp'):
+    """On-demand interpolation across the leading dimension(s) of a Tracept object's Mutables via Tracept wrapper
+    Args:
+      interp_mode which interpolating type to use, e.g. 'lerp'
+    Returns:
+      object mimicing twp where mutable accesses will result in interpolated values
+    """
+    iw = iw_kernels(interp_mode)(Xs, X)
+    if twp._idx is not NO_IDX:
+        iw = [twp._idx+i, w for i,w in iw]
+    return InterpWrapper(twp.node, twp.box, iw)
 
 # # Time varing curves expressed as a linear combination of bases weighted by coeffs that may vary across MC samples
 # class LerpBases:

@@ -275,6 +275,7 @@ class Box:
     def set_mut(self, mid, value, idx = ...):
         self.muts[mid.i] = self.muts[mid.i].at[idx].set(value)
 
+# TODO: could just check if not tuple instead
 NO_IDX = '' # Don't want to use None as that is valid for broadcasting and ... causes it to index last
 
 class Wrapper:
@@ -314,29 +315,6 @@ class Wrapper:
             if type(self.node) == dict:
                 return self.node.__iter__()
             return self.Iterator(self, self.node.__iter__())
-    
-    class LerpWrapper:
-        def __init__(self, node, box, i1_pre, l_pre):
-            self.__dict__['node'] = node
-            self.__dict__['box'] = box
-            self.__dict__['i1_pre'] = i1_pre
-            self.__dict__['l_pre'] = l_pre
-
-        # TODO: label support
-
-        def __setattr__(self, name, value):
-            raise RuntimeError('Interpolation is for get access only')
-
-        def __getattr__(self, name):
-            value = getattr(self.node, name) # Get value or function from actual z object
-            if type(value) is MutableID:
-                return self.box.get_mut(value, idx=(self.i1_pre-1,))*(1-self.l_pre) + self.box.get_mut(value, idx=(self.i1_pre,))*self.l_pre
-            elif is_dataclass(type(value)):
-                return Wrapper.LerpWrapper(value, self.box, self.i1_pre, self.l_pre)
-            elif type(value) in [list, tuple, dict]:
-                raise ValueError('Upcoming feature') # TODO: need another? or just test in wrap?
-            else:
-                raise ValueError('Can only interpolate dynamics')
 
     # class Array:
     #     # i_pre = 
@@ -456,11 +434,6 @@ class Wrapper:
             old_mut = self.box.get_mut(mid, self.idx)
             single_size = old_mut[]
             self.box.set_mut(mid, jnp.reshape(values[...,ptr+old_mut], old_mut.shape), self.idx)
-
-    def lerp(self, ts: float, t: jtp.ArrayLike):
-        i1 = jnp.clip(jnp.searchsorted(t, ts, side='right'), 1, len(t) - 1)
-        l  = jnp.clip((ts - t[i1-1])/(t[i1] - t[i1-1]), 0.0, 1.0)
-        return Wrapper.LerpWrapper(self.node, self.box, i1, l) # TODO: idx
 
     # TODO: repr for tree structure only, dynamic only, and static only, no children ie ...
     def __format__(self, spec):
