@@ -347,7 +347,7 @@ class Wrapper:
         self.__dict__['_idx'] = idx
 
     @property
-    def idx(self):
+    def idx(self) -> Ellipsis|tuple: # TODO: confusing notating since others use just idx to store
         # Can't store ... in ._idx by default as don't want to prepend ... if user indices directly
         return ... if self._idx is NO_IDX else self._idx
     
@@ -381,11 +381,11 @@ class Wrapper:
         elif inspect.ismethod(value): # Need to be able to override self so get from class here
             return lambda *v, _self=self, _f=getattr(type(self.node),name), **k: _f(_self, *v, **k)
         elif is_dataclass(type(value)) or callable(value):
-            return Wrapper(value, self.box, is_root=False, idx=self.idx)
+            return Wrapper(value, self.box, is_root=False, idx=self._idx)
         # elif callable(value):
         #     return partial(value, tracept_self=self)
         elif type(value) in [list, tuple, dict]:
-            return self.Iterable(value, self.box, self.idx)
+            return self.Iterable(value, self.box, self._idx)
         else:
             return value
     
@@ -446,7 +446,7 @@ class Wrapper:
                 case 'm': do_mut = True
                 case 'l': do_leaves = True
                 case 't': do_subclasses = True
-                case _: raise ValueError('"{s}" is not a recognized format specifier, use "t" to show tclasses, "m" to show mutables, and/or "l" to show other leaves'.format(s))
+                case _: raise ValueError('"{s}" is not a recognized format specifier, use "t" to show Tracept children, "m" to show mutables, and/or "l" to show other leaves'.format(s))
 
         for field in fields:
             value = getattr(self.node, field.name)
@@ -455,7 +455,7 @@ class Wrapper:
                     fields_repr += '{}={}, '.format(field.name, np.array2string(self.box.get_mut(value, idx=self.idx), max_line_width=1000))
             elif is_dataclass(type(value)): # TODO: assumed t class, allow others?
                 if do_subclasses:
-                    fields_repr += ('{}={:'+spec+'}, ').format(field.name, Wrapper(value, self.box, is_root=False, idx=self.idx))
+                    fields_repr += ('{}={:'+spec+'}, ').format(field.name, Wrapper(value, self.box, is_root=False, idx=self._idx))
             elif field.name != '__is_baked__':
                 if do_leaves:
                     fields_repr += '{}={}, '.format(field.name, value)
