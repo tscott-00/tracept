@@ -229,6 +229,7 @@ class Meta:
         """
         mid = MutableID(len(self.mut_shapes))
         self.mut_shapes.append(mut.shape)
+        mut.labels = list(set(mut.labels)) # Remove duplicates
         for label in mut.labels:
             if label not in self.labeled_mut_ids:
                 self.labeled_mut_ids[label] = []
@@ -347,7 +348,7 @@ class Wrapper:
         self.__dict__['_idx'] = idx
 
     @property
-    def idx(self) -> Ellipsis|tuple: # TODO: confusing notating since others use just idx to store
+    def idx(self) -> Ellipsis.__class__|tuple: # TODO: confusing notating since others use just idx to store
         # Can't store ... in ._idx by default as don't want to prepend ... if user indices directly
         return ... if self._idx is NO_IDX else self._idx
     
