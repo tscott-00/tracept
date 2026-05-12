@@ -49,7 +49,6 @@ def update_and_record(i, tin, meta, muts, mut_stacks):
 
 # Generic integrator step, currently set up for predetermind time steps
 def integrator_step(i, args, fstep):
-    print('ENTRY')
     t, tin, meta, muts, mut_stacks = args
     dt = t[i] - t[i-1]
 
@@ -58,8 +57,6 @@ def integrator_step(i, args, fstep):
     
     # Call integrator to progress independent variables from i-1 to i
     fstep(twp, dt)
-
-    print('END OF STEP meta', meta)
 
     return t, tin, meta, twp.box.muts, mut_stacks
 
