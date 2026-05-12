@@ -57,7 +57,7 @@ class jit:
             param_names = inspect.signature(func).parameters
             self.is_member = len(param_names) > 0 and next(iter(param_names)) == 'self'
 
-    def __call__(self, *vargs, **kwargs):
+    def __call__(self, *vargs, mode='', **kwargs):
         if self.is_pre_deco:
             if len(vargs) != 1 or len(kwargs) != 0:
                 raise RuntimeError('If arguments are provided to tmethod during decoration then further args are not allowed')
@@ -66,7 +66,7 @@ class jit:
         if self.is_member:
             raise NotImplementedError('CBL')
         else:
-            def outer(*v, **k):
+            def outer(*v, mode=mode, __cache__=[None,], **k):
                 args = list(v) + list(k.values())
                 targ_info, muts, rarg_I, rargs = [], [], [], []
                 for i, arg in enumerate(args):
@@ -76,29 +76,59 @@ class jit:
                     else:
                         rarg_I.append(i)
                         rargs.append(arg)
-                @jax.jit
-                def jinner(muts, rargs, N_args=len(args), rarg_I=rarg_I, keys=k.keys()):
-                    args = [None]*N_args
+                if __cache__[0] == None:
+                    # @jax.jit
+                    def jinner(muts, *rargs, mode=mode, N_args=len(args), rarg_I=rarg_I, keys=k.keys(), Nv=len(v)):
+                        args = [None]*N_args
+                        ptr_mut = 0
+                        for i, N_mut, tin, meta in targ_info:
+                            args[i] = Wrapper(tin, Box(muts[ptr_mut:ptr_mut+N_mut], meta))
+                            ptr_mut += N_mut
+                        for i, rarg in zip(rarg_I, rargs):
+                            args[i] = rarg
+                        _v, _k = args[:Nv], dict(zip(keys, args[Nv:]))
+                        # print('VNG', vng)
+                        # if vng:
+                        #     print('VNG')
+                        #     outputs = jax.value_and_grad(self.func)(*_v, **_k)
+                        # else:
+                        if mode == '':
+                            outputs = self.func(*_v, **_k)
+                            muts = []
+                            for i, *_ in targ_info:
+                                muts += args[i].box.muts
+                            return muts, outputs
+                        else:
+                            return self.func(*_v, **_k)
+                        # else:
+                            
+                    if mode=='vng':
+                        # print('saving as vng')
+                        __cache__[0] = jax.jit(jax.value_and_grad(jinner, argnums=1)) # TODO: user specified nums
+                    elif mode=='grad':
+                        # print('saving as vng')
+                        __cache__[0] = jax.jit(jax.grad(jinner, argnums=1)) # TODO: user specified nums
+                    else:
+                        # print('SAVING AS NON VNG')
+                        __cache__[0] = jax.jit(jinner)
+                
+                jinner = __cache__[0]
+                # if vng:
+                if mode == '':
+                    # print('regular eval')
+                    muts, outputs = jinner(muts, *rargs)
+
                     ptr_mut = 0
                     for i, N_mut, tin, meta in targ_info:
-                        args[i] = Wrapper(tin, Box(muts[ptr_mut:ptr_mut+N_mut], meta))
+                        args[i].box.muts = muts[ptr_mut:ptr_mut+N_mut]
                         ptr_mut += N_mut
-                    for i, rarg in zip(rarg_I, rargs):
-                        args[i] = rargs
-                    _v, _k = args[:Nv], zip(keys, args[Nv:])
-                    outputs = self.func(*_v, **_k)
-                    muts = []
-                    for i, *_ in targ_info:
-                        muts += args[i].box.muts
-                    return muts, outputs
-                muts, outputs = jinner(muts, rargs)
 
-                ptr_mut = 0
-                for i, N_mut, tin, meta in targ_info:
-                    args[i].box.muts = muts[ptr_mut:ptr_mut+N_mut]
-                    ptr_mut += N_mut
-
-                return outputs
+                    return outputs
+                else:
+                    # a,b = jinner(muts, *rargs)
+                    # print('vng eval', jinner(muts, *rargs))# a, b)
+                    return jinner(muts, *rargs)
+                   
             return outer
 
 
@@ -202,12 +232,13 @@ class Mutable:
 # Dynamic and Derivative fields in a dsp_class are automatically turned into a DynamicsMap during build_z and store indices to the dynamic map
 # @partial(jax.tree_util.register_dataclass, data_fields=['i'], meta_fields=[])
 @partial(jax.tree_util.register_dataclass, data_fields=[], meta_fields=['i'])
-@dataclass
+@dataclass#(frozen=True)
 class MutableID:
     i: int #: indexes the underlying tuple of mut
 
     def __lt__(self, other): return self.i < other.i
-    def __hash__(self): return hash(self.i)
+    def __eq__(self, other): return self.i == other.i
+    def __hash__(self): return hash((self.__class__, self.i))
 
 # TODO: only labeled_mut_ids is needed during runtime... and MutableID needs to be static to use as index the way i do
 @partial(jax.tree_util.register_dataclass, data_fields=['labeled_mut_ids', 'defaults'], meta_fields=['mut_shapes'])
@@ -238,7 +269,8 @@ class Meta:
         if default is None:
             default = mut.default
         if default is not None: # TODO: factor too?
-            self.defaults[mid] = default
+            # self.defaults[mid] = default
+            self.defaults[mid.i] = default # JAX can't properly handle pytrees as keys, crashes on flattening unpredictively
         
         return mid
 
@@ -253,8 +285,9 @@ class Meta:
         # print(batch_shape+self.mut_shapes[0], )
         muts = [jnp.zeros(batch_shape+shape) for shape in self.mut_shapes]
         # print(muts[0].shape)
-        for mid, default in self.defaults.items():
-            muts[mid.i] = muts[mid.i].at[...].set(default)
+        for i, default in self.defaults.items():
+            # muts[mid.i] = muts[mid.i].at[...].set(default)
+            muts[i] = muts[i].at[...].set(default)
 
         return muts
 
@@ -523,7 +556,8 @@ def bake_branch(branch, meta):
             # Note that the mids in sub_meta are references so the offset modified above is carried over
             for label, mut_ids in sub_meta.labeled_mut_ids.items():
                 meta.labeled_mut_ids[label] = meta.labeled_mut_ids.get(label, []) + mut_ids
-            meta.defaults = {**meta.defaults, **sub_meta.defaults}
+            # meta.defaults = {**meta.defaults, **sub_meta.defaults}
+            meta.defaults = {**meta.defaults, **{k+mid_offset: v for k, v in sub_meta.defaults.items()}}
             # print('after', meta.defaults)
             # bake_branch(sub_branch, meta)
         elif type(node) is not MutableID and is_dataclass(type(node)) or type(node) in [list, tuple, dict]:

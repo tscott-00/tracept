@@ -27,6 +27,9 @@ def lerp_iw(Xs: jtp.ArrayLike|tuple[jtp.ArrayLike], X: jtp.ArrayLike|tuple[jtp.A
     I = [jnp.clip(jnp.searchsorted(X[j], Xs[j], side='right'), 1, len(X[j])-1) for j in range(D)]
     L = [jnp.clip((Xs[j] - X[j][I[j]-1]) / (X[j][I[j]] - X[j][I[j]-1]), 0.0, 1.0) for j in range(D)]
     verts = -np.array(np.unravel_index(np.arange(2**D), [2]*D)).T # (2**D, D) verts are index offsets, -1 or 0
+    # print('Xs', Xs)
+    # print('X', X)
+    # print('L', L)
 
     return [(
         tuple([verts[v,i] + I[i] for i in range(D)]),
@@ -88,6 +91,9 @@ class InterpWrapper:
             m = self.box.get_mut(value,idx=self.idx)
             return reduce(lambda a,b:a+b, [w*m[i] for i, w in self.iw])
         elif isinstance(value, jax.Array):
+            # print('value.shape', value.shape)
+            # print('self.iw', self.iw[0])
+            # print(name, value.shape)#, self.iw, value[self.idx].shape)
             return reduce(lambda a,b:a+b, [w*value[self.idx][i] for i, w in self.iw])
         elif is_dataclass(type(value)):
             return Wrapper.LerpWrapper(value, self.box, self.idx, self.iw)
