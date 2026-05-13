@@ -25,8 +25,19 @@ class Derivative(Mutable):
 
     # TODO: needs to make sure it gets added to meta in same order!!!
     def __pre_bake__(self, owner, prior_mut_nodes):
-        state_desc = prior_mut_nodes[self.field_name][0]
-        # print(self.field_name, state)
+        N_prior_deriv = 0
+        i_corresponding_state = None
+        for i, (other_mut_name, other_mut_desc, _) in enumerate(prior_mut_nodes):
+            if 'derivs' in other_mut_desc.labels:
+                N_prior_deriv += 1
+            if other_mut_name == self.field_name:
+                i_corresponding_state = i
+        # We will be placed in idx of N_prior_deriv in derivs labels, reoder state to match deriv order
+        corresponding_state = prior_mut_nodes[i_corresponding_state]
+        prior_mut_nodes[i_corresponding_state] = prior_mut_nodes[N_prior_deriv]
+        prior_mut_nodes[N_prior_deriv] = corresponding_state
+        # TODO: not ideal if some other bake function is wanting orders too
+        state_desc = corresponding_state[1]
         state_desc.labels.append('states')
         self.shape = state_desc.shape
 

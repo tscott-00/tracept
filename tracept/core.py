@@ -519,7 +519,7 @@ def bake_branch(branch, meta):
         raise TypeError('Unrecognized branch type {}'.format(type(branch)))
     
     # Begin by finding all Mutables and calling any pre_bake functions
-    mut_nodes = {}
+    mut_nodes = []
     for field in fields:
         node = getattr(branch, field.name)
 
@@ -531,9 +531,9 @@ def bake_branch(branch, meta):
             bake_func = getattr(desc, '__pre_bake__', None)
             if bake_func is not None:
                 bake_func(branch, mut_nodes)
-            mut_nodes[field.name] = (desc, node if not isinstance(node, Mutable) else desc.default)
+            mut_nodes.append((field.name, desc, node if not isinstance(node, Mutable) else desc.default))
     # Place MutableIDs at all Mutable fields
-    for name, (desc, default) in mut_nodes.items():
+    for name, desc, default in mut_nodes:
         setattr(branch, name, meta.append(desc, default))
     # Bake children
     for field in fields:
