@@ -2,6 +2,7 @@
 
 # Authors: Thomas A. Scott https://www.scott-aero.com/
 
+import copy
 import inspect
 from functools import partial, reduce
 from dataclasses import dataclass, field, is_dataclass, make_dataclass
@@ -262,9 +263,20 @@ class Meta:
         self.mut_shapes.append(mut.shape)
         mut.labels = list(set(mut.labels)) # Remove duplicates
         for label in mut.labels:
+            required_idx = None
+            if type(label) is tuple: label, required_idx = label 
+            if type(label) is not str: raise TypeError(f'Invalid label type {type(label)}, must be str or (str,int)')
             if label not in self.labeled_mut_ids:
                 self.labeled_mut_ids[label] = []
-            self.labeled_mut_ids[label].append(mid)
+            if required_idx is None:
+                self.labeled_mut_ids[label].append(mid)
+            else:
+                max_idx = len(self.labeled_mut_ids[label])-1
+                if required_idx > max_idx:
+                    self.labeled_mut_ids[label] += [None]*(required_idx - max_idx)
+                if self.labeled_mut_ids[label][required_idx] is not None:
+                    raise ValueError(f'Index {required_idx} was required for an item with label f{label} but this slot was already filled')
+                self.labeled_mut_ids[label][required_idx] = mid
 
         if default is None:
             default = mut.default
@@ -527,13 +539,16 @@ def bake_branch(branch, meta):
         # print(isinstance(node, Mutable) , isinstance(field.type, Mutable) , isinstance(field.type, type) and issubclass(field.type, Mutable))
         # Ensure either the value is Mutable or the dataclass type is Mutable (via either raw type or instance as type)
         if isinstance(node, Mutable) or isinstance(field.type, Mutable) or (isinstance(field.type, type) and issubclass(field.type, Mutable)):
-            desc = node if isinstance(node, Mutable) else (field.type if isinstance(field.type, Mutable) else Mutable())
-            bake_func = getattr(desc, '__pre_bake__', None)
-            if bake_func is not None:
-                bake_func(branch, mut_nodes)
+            desc, do_copy = (node,False) if isinstance(node, Mutable) else ((field.type,True) if isinstance(field.type, Mutable) else (Mutable(),False))
+            if do_copy: desc = copy.deepcopy(desc)
             mut_nodes.append((field.name, desc, node if not isinstance(node, Mutable) else desc.default))
     # Place MutableIDs at all Mutable fields
-    for name, desc, default in mut_nodes:
+    for i, (name, desc, default) in enumerate(mut_nodes):
+        if hasattr(desc, '__pre_bake__'):
+            # Copy just to be safe (particularly since can be from field.type) - nevermind, is also mutating states... would have to always copy to make safe
+            # name, desc, default = mut_nodes[i] = (name, copy.deepcopy(desc), default) # TODO: allow pre bake to change default?
+            desc.__pre_bake__(branch, mut_nodes)
+    for i, (name, desc, default) in enumerate(mut_nodes):
         setattr(branch, name, meta.append(desc, default))
     # Bake children
     for field in fields:

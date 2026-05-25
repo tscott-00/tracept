@@ -24,22 +24,35 @@ class Derivative(Mutable):
         self.labels = ['derivs']+other_labels
 
     # TODO: needs to make sure it gets added to meta in same order!!!
-    def __pre_bake__(self, owner, prior_mut_nodes):
-        N_prior_deriv = 0
-        i_corresponding_state = None
-        for i, (other_mut_name, other_mut_desc, _) in enumerate(prior_mut_nodes):
-            if 'derivs' in other_mut_desc.labels:
-                N_prior_deriv += 1
-            if other_mut_name == self.field_name:
-                i_corresponding_state = i
-        # We will be placed in idx of N_prior_deriv in derivs labels, reoder state to match deriv order
-        corresponding_state = prior_mut_nodes[i_corresponding_state]
-        prior_mut_nodes[i_corresponding_state] = prior_mut_nodes[N_prior_deriv]
-        prior_mut_nodes[N_prior_deriv] = corresponding_state
-        # TODO: not ideal if some other bake function is wanting orders too
-        state_desc = corresponding_state[1]
-        state_desc.labels.append('states')
-        self.shape = state_desc.shape
+    def __pre_bake__(self, owner, owners_mut_nodes):
+        # TODO: issue with this one is will just crash 
+        # Find our corresponding state
+        state_ptr, corresponding_state = 0, None
+        for i, (mut_name, mut_desc, _) in enumerate(owners_mut_nodes):
+            if mut_name == self.field_name:
+                i_corresponding_state, corresponding_state = i, mut_desc
+        if corresponding_state is None: raise ValueError(f'Coud not find corresponding state "{self.field_name}", ensure it is in the same branch')
+        
+        # First derivative to be processesed marks all state-derivative pairs on this branch
+        if 'states' not in corresponding_state.labels:
+            for i, (mut_name, mut_desc, _) in enumerate(owners_mut_nodes):
+                if 'derivs' in mut_desc.labels: # This is before any deriv str labels become tuples
+                    for j, (other_mut_name, other_mut_desc, _) in enumerate(owners_mut_nodes):
+                        if other_mut_name == mut_desc.field_name:
+                            if 'states' in other_mut_desc.labels: raise ValueError(f'{self.field_name} cannot already be marked as a memeber of states when a derivative is specified')
+                            other_mut_desc.labels.append('states')
+                            break
+        
+        # Count all states proceeding corresponding_state to get its index
+        for i in range(i_corresponding_state):
+            mut_desc = owners_mut_nodes[i][1]
+            if 'states' in mut_desc.labels:
+                state_ptr += 1
+        
+        self.labels[0] = ('derivs', state_ptr)
+        # print('placing deriv of ', self.field_name, 'at ', state_ptr)
+        
+        self.shape = corresponding_state.shape
 
 # Forward Euler scheme
 def step_fe(twp, dt):
