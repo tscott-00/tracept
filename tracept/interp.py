@@ -15,11 +15,6 @@ import jax.typing as jtp
 from tracept import Tracept, Mutable
 from tracept.core import MutableID, NO_IDX
 
-# def lerp(self, ts: float, t: jtp.ArrayLike):
-    #     i1 = jnp.clip(jnp.searchsorted(t, ts, side='right'), 1, len(t) - 1)
-    #     l  = jnp.clip((ts - t[i1-1])/(t[i1] - t[i1-1]), 0.0, 1.0)
-    #     return Wrapper.LerpWrapper(self.node, self.box, i1, l) # TODO: idx
-
 def lerp_iw(Xs: jtp.ArrayLike|tuple[jtp.ArrayLike], X: jtp.ArrayLike|tuple[jtp.ArrayLike]):
     if type(Xs) not in [tuple, list]: Xs, X = [Xs], [X] #raise TypeError('Need tuple or list of Xs')
 
@@ -36,7 +31,6 @@ def lerp_iw(Xs: jtp.ArrayLike|tuple[jtp.ArrayLike], X: jtp.ArrayLike|tuple[jtp.A
         reduce(lambda a,b:a*b, [1-L[d] if verts[v,d]==-1 else L[d] for d in range(D)])
     ) for v in range(verts.shape[0])]
 
-# @partial(jax.jit, static_argnames='D')
 def lerp(Xs: jtp.ArrayLike|tuple[jtp.ArrayLike], X: jtp.ArrayLike|tuple[jtp.ArrayLike], f: jtp.ArrayLike):
     """
     Args:

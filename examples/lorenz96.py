@@ -14,6 +14,7 @@ import jax
 import jax.numpy as jnp
 
 import tracept
+import tracept.interp
 from tracept import Tracept, Mutable
 from tracept.odes import Derivative
 
@@ -40,12 +41,14 @@ class Lorenz96(metaclass=Tracept):
 
         self.dx = (jnp.roll(self.x,-1,axis=-1) - jnp.roll(self.x,2,axis=-1))*jnp.roll(self.x,1,axis=-1) - self.x + 8.0
 
-if __name__ == "__main__":
-    import argparse
+N = 2 # Number of distinct sims to run simulatenously
 
-    N = 2 # Number of distinct sims to run simulatenously
-    state = Lorenz96.new(dims=8, batch_shape=N)
+@tracept.jit
+def jit_make():
+    return Lorenz96.new(dims=8, batch_shape=N)
 
+@tracept.jit
+def jit_proturb(state):
     # Apply proturbations
     for i in range(N):
         # Note that z0 is a Tracept object but z0[...].x is a JAX array (or slice of one)
@@ -64,12 +67,24 @@ if __name__ == "__main__":
         # _x = state.x
         # _x += 1
 
+if __name__ == "__main__":
+    import argparse
+
+    # Tracept jitted functions can take in and return objects who use the Tracept metaclass
+    #   you can also use native JAX jit but must pass and return my_obj.frozen() instead of my_obj and then use my_obj.live() to get it back
+    #   Tracept jit over native JAX jit is recommended since the additional overhead is minimal
+    state = jit_make()
+    # They can also modify such objects in-place
+    #   functions using native JAX jit cannot, they must return the object
+    jit_proturb(state)
+
     # Run JIT compiled integrator
     t, states = tracept.odes.make_integrator(tracept.odes.step_fe)(state, dt=1E-2, T=30.0)
     # Print state at final time
     print('Output shapes and terminal states:', states.x.shape, states[-1].x.shape)
     print(states[-1].x)
-    print('Is lerp working:', np.allclose((states[0].x+states[1].x)/2, states.lerp(0.5, np.arange(t.size)).x))
+    lerp = tracept.interp.interp_class(0.5, np.arange(t.size), states, 'lerp')
+    print('Is lerp working:', np.allclose((states[0].x+states[1].x)/2, lerp.x))
 
     # TODO: Plot first 3 states
 

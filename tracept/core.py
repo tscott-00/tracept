@@ -17,9 +17,9 @@ import jax.typing as jtp
 # TODO: via meta, allow int and bool dynamics natively
 # TODO: allow dynamics to be stored individually in the box? then aggregates need to be stacked... unless aggregates stay as list of I then it is natural
 
-# TODO: make clear what limitations on calling are - can wrap inside jit when jitting then remake outside, but is it good to return wrapper and have JAX pytree it?
-#       issue is can't use the wrapper we entered with since immutable jax pytree... JIT needs to only see the pieces
-#       #1: jit sees tmethod, takes in jax pytree Wrapper, take appart the jaxed static list into a python list, give mutable version to actual function during compilation
+# TODO: make clear what limitations on calling are - can wrap inside jit when jitting then remake outside, but is it good to return Live and have JAX pytree it?
+#       issue is can't use the Live we entered with since immutable jax pytree... JIT needs to only see the pieces
+#       #1: jit sees tmethod, takes in jax pytree Live, take appart the jaxed static list into a python list, give mutable version to actual function during compilation
 #       #2: custom jit takes in vanilla twrap, unpacks, passes to jax jitted wrap func that repacks sends to actual f, unpacks and returns out of jit, then it is repacked
 
 class Tracept(type):
@@ -42,9 +42,7 @@ class Tracept(type):
             if type(batch_shape) is int:
                 batch_shape = (batch_shape,)
 
-            return Wrapper(tin, Box(meta.new_muts(batch_shape), meta), is_root=True)
-
-
+            return Live(tin, Box(meta.new_muts(batch_shape), meta))
 
 # TODO: in other file
 def jit(func=None, *, mode=''):
@@ -59,7 +57,7 @@ def jit(func=None, *, mode=''):
                 args = list(v) + list(k.values())
                 targ_info, muts, rarg_I, rargs = [], [], [], []
                 for i, arg in enumerate(args):
-                    if type(arg) is Wrapper:
+                    if type(arg) is Live:
                         muts += arg.box.muts
                         targ_info.append((i, len(muts), arg.node, arg.box.meta))
                     else:
@@ -71,13 +69,23 @@ def jit(func=None, *, mode=''):
                         args = [None]*N_args
                         ptr_mut = 0
                         for i, N_mut, tin, meta in targ_info:
-                            args[i] = Wrapper(tin, Box(muts[ptr_mut:ptr_mut+N_mut], meta))
+                            args[i] = Live(tin, Box(muts[ptr_mut:ptr_mut+N_mut], meta))
                             ptr_mut += N_mut
                         for i, rarg in zip(rarg_I, rargs):
                             args[i] = rarg
                         _v, _k = args[:Nv], dict(zip(keys, args[Nv:]))
                         if mode == '':
                             outputs = func(*_v, **_k)
+                            if type(outputs) is Live:
+                                outputs = outputs.frozen()
+                            elif type(outputs) is tuple:
+                                outputs = list(outputs)
+                                for i, out in enumerate(outputs):
+                                    if type(out) is Live:
+                                        outputs[i] = out.frozen()
+                                outputs = tuple(outputs)
+
+
                             muts = []
                             for i, *_ in targ_info:
                                 muts += args[i].box.muts
@@ -98,6 +106,15 @@ def jit(func=None, *, mode=''):
                 if mode == '':
                     # print('regular eval')
                     muts, outputs = jinner(muts, *rargs)
+
+                    if type(outputs) is Frozen:
+                        outputs = outputs.live()
+                    elif type(outputs) is tuple:
+                        outputs = list(outputs)
+                        for i, out in enumerate(outputs):
+                            if type(out) is Frozen:
+                                outputs[i] = out.live()
+                        outputs = tuple(outputs)
 
                     ptr_mut = 0
                     for i, N_mut, tin, meta in targ_info:
@@ -153,6 +170,8 @@ def tclass(cls=None, *, static_attrnames=[]):
 
 # Indicates a field will be part of the dynamic shape, user provides shape of data (at a given time for a single MC sample)
 class Mutable:
+    """Specification for property that can be modified in place via Live"""
+
     def __init__(self, default=None, shape=(), labels=None):
         """
         Args:
@@ -240,7 +259,17 @@ class Meta:
 
         return muts
 
-# Shared container to keep track of mutating z_dyn, subclass so it can be used in other wrappers easily
+@partial(jax.tree_util.register_dataclass, data_fields=['tin', 'muts', 'meta'], meta_fields=[])
+@dataclass
+class Frozen: # for entering and exiting 
+    tin: Any
+    muts: tuple[jax.Array]
+    meta: Meta
+
+    def live(self):
+        return Live(self.tin, Box(self.muts, self.meta))
+
+# Shared container to keep track of mutating z_dyn, subclass so it can be used in other Lives easily
 @dataclass
 class Box:
     muts: list[jax.Array]
@@ -261,16 +290,18 @@ class Box:
 # TODO: could just check if not tuple instead
 NO_IDX = '' # Don't want to use None as that is valid for broadcasting and ... causes it to index last
 
-class Wrapper:
+class Live:
+    """Wrapper class to """
+
     class Iterable:
         @dataclass
         class Iterator:
-            node_wrapper: Any
+            node_Live: Any
             node_iter: Any
             
             def __next__(self):
                 value = self.node_iter.__next__()
-                return self.node_wrapper.wrap(value)
+                return self.node_Live.wrap(value)
         
         def __init__(self, node, box, idx=None):
             self.__dict__['node'] = node
@@ -280,12 +311,12 @@ class Wrapper:
         def wrap(self, value):
             # TODO: if support dynamic in init, support DynamicsMap here...
             if is_dataclass(type(value)):
-                return Wrapper(value, self.box, is_root=False, idx=self.idx)
+                return Live(value, self.box, idx=self.idx)
             elif callable(value):
-                return Wrapper(value, self.box, is_root=False, idx=self.idx)
+                return Live(value, self.box, idx=self.idx)
                 # raise ValueError('Collections of functions not supported, may later support static functions')
             elif type(value) in [list, tuple, dict]:
-                return Wrapper.Iterable(value, self.box, self.idx)
+                return Live.Iterable(value, self.box, self.idx)
             else:
                 return value
         
@@ -323,7 +354,7 @@ class Wrapper:
     #     def __bool__(self): return self.aval._bool(self)
     #     def __nonzero__(self): return self.aval._nonzero(self)
     
-    def __init__(self, node, box: Box, is_root: bool = True, idx: tuple = NO_IDX):
+    def __init__(self, node, box: Box, idx: tuple = NO_IDX):
         # Use __dict__ when initializing to avoid __setattr__
         self.__dict__['node'] = node
         self.__dict__['box'] = box
@@ -351,7 +382,7 @@ class Wrapper:
         elif inspect.ismethod(value): # Need to be able to override self so get from class here
             return lambda *v, _self=self, _f=getattr(type(self.node),name), **k: _f(_self, *v, **k)
         elif is_dataclass(type(value)) or callable(value):
-            return Wrapper(value, self.box, is_root=False, idx=self._idx)
+            return Live(value, self.box, idx=self._idx)
         # elif callable(value):
         #     return partial(value, tracept_self=self)
         elif type(value) in [list, tuple, dict]:
@@ -379,7 +410,7 @@ class Wrapper:
         else:
             if self._idx is not NO_IDX:
                 idx = self._idx + idx
-            return Wrapper(self.node, self.box, is_root=False, idx=idx)
+            return Live(self.node, self.box, idx=idx)
 
     def __setitem__(self, idx, value):
         if type(idx) is not tuple: idx = (idx,)
@@ -425,7 +456,7 @@ class Wrapper:
                     fields_repr += '{}={}, '.format(field.name, np.array2string(self.box.get_mut(value, idx=self.idx), max_line_width=1000))
             elif is_dataclass(type(value)): # TODO: assumed t class, allow others?
                 if do_subclasses:
-                    fields_repr += ('{}={:'+spec+'}, ').format(field.name, Wrapper(value, self.box, is_root=False, idx=self._idx))
+                    fields_repr += ('{}={:'+spec+'}, ').format(field.name, Live(value, self.box, idx=self._idx))
             elif field.name != '__is_baked__':
                 if do_leaves:
                     fields_repr += '{}={}, '.format(field.name, value)
@@ -433,6 +464,11 @@ class Wrapper:
 
     def __repr__(self):
         return self.__format__('mlt')
+    
+    def frozen(self):
+        return Frozen(tin=self.node, muts=self.box.muts, meta=self.box.meta)
+# TODO Deprecate
+Wrapper = Live
 
 def bake_list(node_list, meta):
     for node in node_list:
@@ -459,8 +495,6 @@ def bake_branch(branch, meta):
     for field in fields:
         node = getattr(branch, field.name)
 
-        # print(field.name, node)
-        # print(isinstance(node, Mutable) , isinstance(field.type, Mutable) , isinstance(field.type, type) and issubclass(field.type, Mutable))
         # Ensure either the value is Mutable or the dataclass type is Mutable (via either raw type or instance as type)
         if isinstance(node, Mutable) or isinstance(field.type, Mutable) or (isinstance(field.type, type) and issubclass(field.type, Mutable)):
             desc, do_copy = (node,False) if isinstance(node, Mutable) else ((field.type,True) if isinstance(field.type, Mutable) else (Mutable(),False))
@@ -477,7 +511,7 @@ def bake_branch(branch, meta):
     # Bake children
     for field in fields:
         node = getattr(branch, field.name)
-        if isinstance(node, Wrapper):
+        if isinstance(node, Live):
             # Extract baked sub branch
             sub_branch, sub_meta = node.node, node.box.meta
             setattr(branch, field.name, sub_branch)
@@ -503,7 +537,7 @@ def bake_branch(branch, meta):
             # print('BAKING CHILD NODE', type(node))
             bake_branch(node, meta)
 
-def fresh(twp, batch_shape=()):
+def fresh(liv, batch_shape=()):
     if type(batch_shape) is not tuple: batch_shape = (batch_shape,)
-    meta = twp.box.meta
-    return Wrapper(twp.node, Box(meta.new_muts(batch_shape), meta))
+    meta = liv.box.meta
+    return Live(liv.node, Box(meta.new_muts(batch_shape), meta))
