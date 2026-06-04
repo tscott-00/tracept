@@ -22,11 +22,7 @@ import jax.typing as jtp
 #       #1: jit sees tmethod, takes in jax pytree Wrapper, take appart the jaxed static list into a python list, give mutable version to actual function during compilation
 #       #2: custom jit takes in vanilla twrap, unpacks, passes to jax jitted wrap func that repacks sends to actual f, unpacks and returns out of jit, then it is repacked
 
-# TODO: test on 0 muts
-# TODO: nested twrap
-
 class Tracept(type):
-    # TODO: tmethod all member funcs? they can all only be called from wrap now
     def __new__(cls, name, bases, dct, **kwargs):
         return tclass(super().__new__(cls, name, bases, dct), static_attrnames=kwargs.pop('static_attrnames', []))
 
@@ -48,23 +44,15 @@ class Tracept(type):
 
             return Wrapper(tin, Box(meta.new_muts(batch_shape), meta), is_root=True)
 
+
+
 # TODO: in other file
-class jit:
-    # TODO: allow static args etc for jax
-    def __init__(self, func=None):#, *, z_out=None):
-        self.is_pre_deco = func == None
-        if not self.is_pre_deco:
-            self.func = func
-            param_names = inspect.signature(func).parameters
-            self.is_member = len(param_names) > 0 and next(iter(param_names)) == 'self'
+def jit(func=None, *, mode=''):
+    def _jit(func, mode=mode):
+        param_names = inspect.signature(func).parameters
+        is_member = len(param_names) > 0 and next(iter(param_names)) == 'self'
 
-    def __call__(self, *vargs, mode='', **kwargs):
-        if self.is_pre_deco:
-            if len(vargs) != 1 or len(kwargs) != 0:
-                raise RuntimeError('If arguments are provided to tmethod during decoration then further args are not allowed')
-            return tmethod(vargs[0])
-
-        if self.is_member:
+        if is_member:
             raise NotImplementedError('CBL')
         else:
             def outer(*v, mode=mode, __cache__=[None,], **k):
@@ -88,29 +76,21 @@ class jit:
                         for i, rarg in zip(rarg_I, rargs):
                             args[i] = rarg
                         _v, _k = args[:Nv], dict(zip(keys, args[Nv:]))
-                        # print('VNG', vng)
-                        # if vng:
-                        #     print('VNG')
-                        #     outputs = jax.value_and_grad(self.func)(*_v, **_k)
-                        # else:
                         if mode == '':
-                            outputs = self.func(*_v, **_k)
+                            outputs = func(*_v, **_k)
                             muts = []
                             for i, *_ in targ_info:
                                 muts += args[i].box.muts
                             return muts, outputs
                         else:
-                            return self.func(*_v, **_k)
+                            return func(*_v, **_k)
                         # else:
                             
                     if mode=='vng':
-                        # print('saving as vng')
                         __cache__[0] = jax.jit(jax.value_and_grad(jinner, argnums=1)) # TODO: user specified nums
                     elif mode=='grad':
-                        # print('saving as vng')
                         __cache__[0] = jax.jit(jax.grad(jinner, argnums=1)) # TODO: user specified nums
                     else:
-                        # print('SAVING AS NON VNG')
                         __cache__[0] = jax.jit(jinner)
                 
                 jinner = __cache__[0]
@@ -132,54 +112,11 @@ class jit:
                    
             return outer
 
+    if func == None:
+        return _jit # User called during decoration, not yet time
+    return _jit(func)
 
 
-
-# Tracept function decorator
-# Static functions can be called from anywhere and take and return only z
-# Member functions are only called from tracept static functions and can take and return anything
-# class tmethod:
-#     def __init__(self, func=None):#, *, z_out=None):
-#         self.is_pre_deco = func == None
-#         # self.z_out = z_out
-#         # TODO: specific locked attribs (no read or write)?
-#             # TODO: way to do separate containers for a set of active variables? could speed up things like pont solver a lot
-#         if not self.is_pre_deco:
-#             self.func = func
-#             param_names = inspect.signature(func).parameters
-#             self.is_member = len(param_names) > 0 and next(iter(param_names)) == 'self'
-
-#             # print('new tmethod', func, inspect.signature(func).parameters[0], inspect.ismethod(func), inspect.isfunction(func))
-#             # @functools.wraps(func) # TODO: retain signature
-
-#     # Users should call with z, internal state managers like integrators should call with z_dyn and z
-#     def __call__(self, *vargs, **kwargs):
-#         if self.is_pre_deco:
-#             if len(vargs) != 1 or len(kwargs) != 0:
-#                 raise RuntimeError('If arguments are provided to tmethod during decoration then further args are not allowed')
-#             return tmethod(vargs[0])#, z_out=self.z_out)
-
-#         if self.is_member:
-#             if not 'tracept_self' in kwargs:
-#                 raise ValueError('Tracept member functions must be called from within a Tracept static function as part of wrapped z')
-#             tracept_self = kwargs['tracept_self']
-#             del kwargs['tracept_self']
-#             return self.func(tracept_self, *vargs, **kwargs)
-#         else:
-#             # TODO: how does jax deal with the io? should we 
-#             if 'z_tree' in kwargs:
-#                 result = self.func(z=Wrapper(kwargs['z_dyn'], kwargs['z_tree'], is_root=True))
-#                 # TODO: allow other return values along with z?
-#                 # if self.z_out:
-#                 if isinstance(result, Wrapper):
-#                     result = result.z_box.z_dyn
-#             elif 'z' in kwargs:
-#                 # If given a Wrapper, know this is nested call and don't intervene
-#                 # TODO: allow generic return if nested static? take root flag for clarity?
-#                 result = self.func(z=kwargs['z'])
-#             else:
-#                 raise ValueError('tmethods must be called with either wrapped z kwarg or both z_tree and z_dyn kwargs')
-#             return result
 
 # TODO: one modality
 def tclass(cls=None, *, static_attrnames=[]):
@@ -282,7 +219,7 @@ class Meta:
             default = mut.default
         if default is not None: # TODO: factor too?
             # self.defaults[mid] = default
-            self.defaults[mid.i] = default # JAX can't properly handle pytrees as keys, crashes on flattening unpredictively
+            self.defaults[mid.i] = default # JAX can't properly handle pytrees as keys, crashes on flattening unpredictively, so use mid.i instead of mid itself
         
         return mid
 
@@ -399,23 +336,10 @@ class Wrapper:
     
     def __call__(self, *v, **k):
         _callable = self.node
-        # print('_callable', _callable)
-        if inspect.isfunction(_callable):
+        if inspect.isfunction(_callable): # intended for static functions
             return _callable(*v, **k)
-        # TODO: member funcs
-        # elif isinstance(_callable, tmethod):
-        #     if _callable.is_member:
-        #         return _callable(*v, tracept_self=self, **k)
-        #     else:
-        #         return _callable(*v, **k)
-        # elif inspect.ismethod(_callable):
-        #     return 
-        elif hasattr(_callable, '__call__'):
+        elif hasattr(_callable, '__call__'): # intended for methods (member functions)
             return getattr(type(_callable), '__call__')(self, *v, **k)
-            # if isinstance(_callable.__call__, tmethod):
-            #     return _callable(*v, tracept_self=self, **k)
-            # else:
-            #     raise ValueError('{} is a callable class but __call__ is not a tmethod'.format(_callable))
         else:
             raise ValueError('{} was called but is not a function, tmethod, or callable class'.format(_callable))
 

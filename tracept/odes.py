@@ -56,12 +56,19 @@ class Derivative(Mutable):
 
 # Forward Euler scheme
 def step_fe(twp, dt):
-    # print(twp['derivs'])
     # for i, deriv in enumerate(twp['derivs']):
     #     twp['states',i] += dt*deriv
     twp['states'] = [s + dt*ds for s, ds in zip(twp['states'], twp['derivs'])]
     # TODO: should we support twp['states'][i] += ... would need to return to return a wrapper ref list which inconiences multi steppers since need to manually copy
     #       just put labeled tutorial and make clear this does not give a reference
+
+# Heun's method
+def step_heun(twp, dt):
+    states0, derivs0 = twp['states'], twp['derivs']
+    twp['states'] = [s + dt*ds for s, ds in zip(twp['states'], twp['derivs'])]
+    twp()
+    derivs1 = twp['derivs']
+    twp['states'] = [s0 + dt/2*(ds0+ds1) for s0, ds0, ds1 in zip(states0, derivs0, derivs1)]
 
 def update_and_record(i, tin, meta, muts, mut_stacks):
     twp = Wrapper(tin, Box(muts, meta))
