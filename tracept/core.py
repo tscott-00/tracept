@@ -480,6 +480,17 @@ def bake_list(node_list, meta):
             raise TypeError('{} not supported'.format(type(node)))
         # Can be static variable, leave it alone
 
+def increment_tree(tree, mid_offset, mid_err_thres):
+    for field in get_fields(tree):
+        node = getattr(tree, field.name)
+        if type(node) is MutableID:
+            if node.i > mid_err_thres:
+                # TODO: allow or not? can allow since mut id carries ref but still pitfall as out of JIT the ref could break on copy but still have mut ref
+                raise ValueError(f'Sub branch with attribute "{field.name}" has already been processed, references are not allowed (likely the parent), use a copy')
+            node.i += mid_offset
+        elif is_dataclass(type(node)) and hasattr(node, '__is_baked__'): # An already baked child node (not a Live, a child of the node)
+            increment_tree(node, mid_offset, mid_err_thres)
+
 def bake_branch(branch, meta):
     if is_dataclass(type(branch)):
         fields = get_fields(branch)
@@ -517,25 +528,18 @@ def bake_branch(branch, meta):
             setattr(branch, field.name, sub_branch)
             # Append sub branch to our meta by offsetting each sub mid and carrying over defaults
             mid_offset = len(meta.mut_shapes)
-            # print('node', type(sub_branch))
-            # print('before', sub_meta.defaults, mid_offset)
-            for sub_field in get_fields(sub_branch):
-                sub_node = getattr(sub_branch, sub_field.name)
-                # print('   sub_node', sub_field.name, sub_node)
-                if type(sub_node) is MutableID:
-                    sub_node.i += mid_offset
-                    # print(sub_node)
+            # Sub_meta has already baked the grandchildren and they are flattened in mut_shapes and defaults but we need to recursively adjust the mids
+            increment_tree(sub_branch, mid_offset, len(sub_meta.mut_shapes))
             meta.mut_shapes += sub_meta.mut_shapes
             # Note that the mids in sub_meta are references so the offset modified above is carried over
             for label, mut_ids in sub_meta.labeled_mut_ids.items():
                 meta.labeled_mut_ids[label] = meta.labeled_mut_ids.get(label, []) + mut_ids
             # meta.defaults = {**meta.defaults, **sub_meta.defaults}
             meta.defaults = {**meta.defaults, **{k+mid_offset: v for k, v in sub_meta.defaults.items()}}
-            # print('after', meta.defaults)
-            # bake_branch(sub_branch, meta)
-        elif type(node) is not MutableID and is_dataclass(type(node)) or type(node) in [list, tuple, dict]:
-            # print('BAKING CHILD NODE', type(node))
-            bake_branch(node, meta)
+        # TODO: allow child lists of muts again
+        # elif type(node) is not MutableID and is_dataclass(type(node)) or type(node) in [list, tuple, dict]:
+        #     # print('BAKING CHILD NODE', type(node))
+        #     bake_branch(node, meta) # TODO: should we? th
 
 def fresh(liv, batch_shape=()):
     if type(batch_shape) is not tuple: batch_shape = (batch_shape,)

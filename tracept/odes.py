@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import jax.typing as jtp
 
 from tracept import Mutable
-from tracept.core import Wrapper, Box
+from tracept.core import Live, Box
 
 class Derivative(Mutable):
     """A mutable that represents the derivative of another"""
@@ -59,7 +59,7 @@ def step_fe(liv, dt):
     # for i, deriv in enumerate(liv['derivs']):
     #     liv['states',i] += dt*deriv
     liv['states'] = [s + dt*ds for s, ds in zip(liv['states'], liv['derivs'])]
-    # TODO: should we support liv['states'][i] += ... would need to return to return a wrapper ref list which inconiences multi steppers since need to manually copy
+    # TODO: should we support liv['states'][i] += ... would need to return to return a Live ref list which inconiences multi steppers since need to manually copy
     #       just put labeled tutorial and make clear this does not give a reference
 
 # Heun's method
@@ -100,7 +100,7 @@ def make_integrator(fstep):
     _integrator_step = jax.jit(partial(integrator_step, fstep=fstep))
     
     def _integrator(liv0, dt, T, _integrator_step=_integrator_step):
-        if type(liv0) is Wrapper:
+        if type(liv0) is Live:
             tin, box = liv0.node, liv0.box
             muts0, meta = box.muts, box.meta
             if len(muts0) == 0: raise TypeError('Cannot integrate a type with no mutable variables')
@@ -118,6 +118,6 @@ def make_integrator(fstep):
         # Final state in general only has independent variables at final time after exiting integrator, call dynamics once more to update to full state at final time
         _, mut_stacks = update_and_record(-1, frz, mut_stacks)
         
-        return t, Wrapper(tin, Box(mut_stacks, meta))
+        return t, Live(tin, Box(mut_stacks, meta))
     
     return _integrator
