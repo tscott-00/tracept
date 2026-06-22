@@ -22,9 +22,6 @@ def lerp_iw(Xs: jtp.ArrayLike|tuple[jtp.ArrayLike], X: jtp.ArrayLike|tuple[jtp.A
     I = [jnp.clip(jnp.searchsorted(X[j], Xs[j], side='right'), 1, len(X[j])-1) for j in range(D)]
     L = [jnp.clip((Xs[j] - X[j][I[j]-1]) / (X[j][I[j]] - X[j][I[j]-1]), 0.0, 1.0) for j in range(D)]
     verts = -np.array(np.unravel_index(np.arange(2**D), [2]*D)).T # (2**D, D) verts are index offsets, -1 or 0
-    # print('Xs', Xs)
-    # print('X', X)
-    # print('L', L)
 
     return [(
         tuple([verts[v,i] + I[i] for i in range(D)]),
@@ -85,9 +82,6 @@ class InterpWrapper:
             m = self.box.get_mut(value,idx=self.idx)
             return reduce(lambda a,b:a+b, [w*m[i] for i, w in self.iw])
         elif isinstance(value, jax.Array):
-            # print('value.shape', value.shape)
-            # print('self.iw', self.iw[0])
-            # print(name, value.shape)#, self.iw, value[self.idx].shape)
             return reduce(lambda a,b:a+b, [w*value[self.idx][i] for i, w in self.iw])
         elif is_dataclass(type(value)):
             return Wrapper.LerpWrapper(value, self.box, self.idx, self.iw)
@@ -97,51 +91,15 @@ class InterpWrapper:
             raise ValueError(f'Can only interpolate mutables or raw jax.Array, got {type(value)}')
 
 def interp_class(Xs: jtp.ArrayLike|tuple[jtp.ArrayLike], X: jtp.ArrayLike|tuple[jtp.ArrayLike], twp, interp_mode: str = 'lerp'):
-    """On-demand interpolation across the leading dimension(s) of a Tracept object's Mutables via Tracept wrapper
+    """On-demand interpolation across the leading dimension(s) of a Tracept object's Mutables via live Tracept object
     Args:
       interp_mode which interpolating type to use, e.g. 'lerp'
     Returns:
       object mimicing twp where mutable accesses will result in interpolated values
     """
     iw = iw_kernels[interp_mode](Xs, X)
-    # if twp._idx is not NO_IDX:
-    #     iw = [(twp._idx+i, w) for i,w in iw]
-    return InterpWrapper(twp.node, twp.box, twp.idx, iw)
 
-# # Time varing curves expressed as a linear combination of bases weighted by coeffs that may vary across MC samples
-# class LerpBases:
-#     x: jtp.ArrayLike # jax.scipy.interpolate.RegularGridInterpolator
-#     f: jtp.ArrayLike
-#     left: jtp.ArrayLike
-#     right: jtp.ArrayLike
-    
-#     # Define number of floats needed for dynamic variables
-#     coeffs: jtp.ArrayLike = Placeholder('Call LerpBases.new() to construct properly!')
-    
-#     @classmethod
-#     def new(cls, x, f, left=None, right=None):
-#         """
-#         x: (Nx)
-#         f: (Nx,Nf)
-#         """
-#         if np.any(np.isclose(np.diff(x),0)):
-#             raise ValueError('x must contain unique values up to machine tolerance')
-#         # if :
-#         # bases = jax.scipy.interpolate.RegularGridInterpolator(x, y, method='linear')
-#         return cls(x, f, left, right, jnp.ones(f.size//x.size))
-    
-#     @tmethod
-#     def __call__(self, xs):
-#         # Slop-free version of jnp.interp (edge cases are disallowed in constructor instead of handled in runtime)
-#         i = jnp.clip(jnp.searchsorted(self.x, xs, side='right'), 1, len(self.x) - 1)
-#         lx, = [jnp.clip((_xs - _x[_i-1])/(_x[_i] - _x[_i-1]), 0.0, 1.0) for _x, _xs, _i in [(self.x, xs, i)]]
-#         # jax.debug.print('{a} {b} {c} {d} {e}', a=i, b=lx, c=len(self.x), d=self.x[i-1], e=self.x[i])
-#         return self.f[i-1,...]*(1-lx) + self.f[i,...]*lx
-#         # return jnp.sum(jnp.interp(xs, self.x, self.f, left=self.left, right=self.right)[None,...] * self.coeffs[...,None], axis=-1)
-    
-#     # @staticmethod
-#     # def __class_getitem__(cls, N):
-#         # return partial(self.__init__, zmap=dict(coeffs = N))
+    return InterpWrapper(twp.node, twp.box, twp.idx, iw)
 
 @partial(jax.tree_util.register_dataclass, data_fields=['array'], meta_fields=['inv_labels'])
 @dataclass
@@ -155,8 +113,14 @@ class LabelWrapper:
     def __getattr__(self, label):
         return self.array[self.inv_labels[label]]
 
+    def __format__(self, spec):
+        print(self.inv_labels)
+        return '(' + ', '.join([f'{k}={self.array[i]}' for k,i in self.inv_labels.items()]) + ')'
+
+    def __repr__(self):
+        return self.__format__('')
+
 # TODO: kwarg constructor
-# TODO: could generalize via recursive function (no overhead once compiled)
 class LerpBox(metaclass=Tracept, static_attrnames=['inv_labels']):
     X: tuple[jtp.ArrayLike] # D arrays of size (Nx_i)
     f: jtp.ArrayLike # (Nx_1, ..., Nx_D, Nf)
@@ -180,19 +144,4 @@ class LerpBox(metaclass=Tracept, static_attrnames=['inv_labels']):
     
     def __call__(self, *Xs):
         fs = lerp(Xs, self.X, self.f)
-        return fs if self.inv_labels == None else LabelWrapper(fs, self.inv_labels)
-
-# # Convenience class for time varing curves the user wishes to specify as constant due to lazyness
-# class DummyBases:
-#     f: jtp.ArrayLike
-    
-#     offsets: jtp.ArrayLike = Placeholder('Call DummyBases.new() to construct properly!')
-    
-#     @classmethod
-#     def new(cls, f, offsets=None):
-#         if offsets is None:
-#             offsets = jnp.zeros(f.shape)
-#         return cls(f, offsets)
-    
-#     def __call__(self, xs):
-#         return self.f
+        return fs if self.node.inv_labels == None else LabelWrapper(fs, self.node.inv_labels)

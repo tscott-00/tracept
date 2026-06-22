@@ -18,10 +18,6 @@ import tracept.interp
 from tracept import Tracept, Mutable
 from tracept.odes import Derivative
 
-# TODO: is meta really a good idea? needs to only happen at highest level - not great for interopability
-#    unless children can be wrapped - could detect if store the original tin (before replacing stuff with mid) or offsetting their mid 
-#    can't modify Mutable etc between init and bake but not a big issue
-
 class Lorenz96(metaclass=Tracept):
     x:  Mutable
     dx: Derivative('x') = None
@@ -75,7 +71,7 @@ if __name__ == "__main__":
     #   Tracept jit over native JAX jit is recommended since the additional overhead is minimal
     state = jit_make()
     # They can also modify such objects in-place
-    #   functions using native JAX jit cannot, they must return the object
+    #   functions using native JAX jit cannot, they must return the modified object
     jit_proturb(state)
 
     # Run JIT compiled integrator

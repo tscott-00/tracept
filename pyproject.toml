@@ -11,11 +11,6 @@ dependencies = [
     "jax",
     "jaxlib",
     "numpy",
-	#"scipy",
-    #"dill",
-    #"matplotlib",
-    #"cmasher",
-    #"mathutils",
 ]
 
 requires-python = ">= 3.10"

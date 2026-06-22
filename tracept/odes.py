@@ -91,7 +91,7 @@ def integrator_step(i, args, fstep):
     return t, liv.frozen(), mut_stacks
 
 # Integrator that takes a Tracept dynamics function
-def make_integrator(fstep):
+def make_fixed_explicit_integrator(fstep):
     # ODE Integrator function
     # TODO: this should be vmap or pmap outside, adjacent memory means doing each individually
     # Optimizing the NN should have batches as the inner dim (time as outer) but need to not copy s every time...
@@ -121,3 +121,5 @@ def make_integrator(fstep):
         return t, Live(tin, Box(mut_stacks, meta))
     
     return _integrator
+# TODO: Deprecate
+make_integrator = make_fixed_explicit_integrator
