@@ -541,7 +541,8 @@ def bake_branch(branch, meta):
         #     # print('BAKING CHILD NODE', type(node))
         #     bake_branch(node, meta) # TODO: should we? th
 
-def fresh(liv, batch_shape=()):
+def fresh_like(liv, batch_shape=()):
     if type(batch_shape) is not tuple: batch_shape = (batch_shape,)
     meta = liv.box.meta
     return Live(liv.node, Box(meta.new_muts(batch_shape), meta))
+
