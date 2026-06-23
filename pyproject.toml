@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tracept"
-version = "0.0.2"
+version = "0.0.4"
 
 # dynamic = ["version"]
 dependencies = [
