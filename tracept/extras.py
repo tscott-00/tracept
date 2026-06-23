@@ -1,3 +1,4 @@
+from functools import partial
 from dataclasses import dataclass
 
 import jax
