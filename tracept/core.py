@@ -307,6 +307,9 @@ class Live:
             node_Live: Any
             node_iter: Any
             
+            def __iter__(self):
+                return self
+
             def __next__(self):
                 value = self.node_iter.__next__()
                 return self.node_Live.wrap(value)
