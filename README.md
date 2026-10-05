@@ -2,9 +2,31 @@
 JIT-compile-time utilities for cleaner JAX code, with extra utilities for dynamic systems
 
 # How it works
-Tracept uses Python metaclasses to process your class into one that can be decomposed automatically into static (any pytree) + mutable parts (typical JAX arrays). The mutable parts can be modified similarly to vanilla Python such as s.x += 1, which would normally be something like s = tree_set(s, 'x', s.x+1). This functionality is only available if using tracept.jit or manually .frozen() before calling a jit function then .live() after entering.
+Tracept uses Python metaclasses to process your class into one that can be decomposed automatically into vanilla (any pytree) + mutable parts (typical JAX arrays). The mutable parts can be modified similarly to vanilla Python such as s.x += 1, which would normally be something like s = tree_set(s, 'x', s.x+1). This functionality is only available if using tracept.jit or manually .frozen() before calling a jit function then .live() after entering.
 
-Static variables can still be modified outside of jit functions and typical pytree objects are subject to the usual JAX recompilation behavior. Members that are also using the Tracept metaclass are subject to more nuanced behavior as described in the next section.
+Vanilla attributes can be assigned directly outside JAX tracing, including attributes
+that are not declared as `Mutable`:
+
+```python
+child = StaticChild.new()  # With an ordinary field: value: int = 7
+child.value = 8
+parent.child.scale = 10
+```
+
+`tracept.jit` passes vanilla attributes as ordinary JAX pytree inputs, including
+attributes of nested children. Changing their values reuses compilation when the
+pytree structure, shapes, and dtypes stay compatible. Fields listed in
+`static_attrnames` are static metadata; changing their values triggers compilation
+for that static value. Values that JAX cannot treat as dynamic leaves, such as
+strings, should be declared static.
+
+Plain attributes are shared across batch entries;
+assigning through an indexed view changes the attribute for every entry. Assigning
+plain attributes inside `tracept.jit`, `jax.jit`, or other JAX transforms raises an
+error. Use `Mutable` fields for state that changes during tracing. Typical pytree
+objects are subject to the usual JAX recompilation behavior. Members that are also
+using the Tracept metaclass are subject to more nuanced behavior as described in
+the next section.
 
 # Copying and replacing children
 
@@ -40,7 +62,8 @@ Replacement rebuilds shapes, labels, defaults, and mutable IDs, removes the old
 child's storage, and preserves other state and sibling views. Replacement arrays
 must broadcast to the parent's batch shape. An indexed parent cannot replace a
 child, and replacement inside `tracept.jit`, `jax.jit`, or other JAX transforms
-raises an error. `tracept.jit` recompiles after a replacement. Views of the
+raises an error. `tracept.jit` recompiles when replacement changes the pytree
+structure, static metadata (including mutable IDs), shapes, or dtypes. Views of the
 replaced subtree become invalid; obtain the child from its parent again. Copies
 and frozen snapshots made beforehand remain independent.
 

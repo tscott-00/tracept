@@ -15,12 +15,12 @@ import jax
 import jax.numpy as jnp
 import jax.typing as jtp
 
-# TODO: via meta, allow int and bool mutables natively (not everything is float), add unit tests
-
 # TODO: make clear what limitations on calling are - can wrap inside jit when jitting then remake outside, but is it good to return Live and have JAX pytree it?
 #       issue is can't use the Live we entered with since immutable jax pytree... JIT needs to only see the pieces
 #       #1: jit sees tmethod, takes in jax pytree Live, take appart the jaxed static list into a python list, give mutable version to actual function during compilation
 #       #2: custom jit takes in vanilla twrap, unpacks, passes to jax jitted wrap func that repacks sends to actual f, unpacks and returns out of jit, then it is repacked
+
+# TODO: make @property work on Tracept classes, add to unit tests
 
 class Tracept(type):
     def __new__(cls, name, bases, dct, **kwargs):
@@ -53,25 +53,27 @@ def jit(func=None, *, mode=''):
         if is_member:
             raise NotImplementedError('CBL')
         else:
-            def outer(*v, mode=mode, __cache__=[None,], **k):
+            def outer(*v, mode=mode, __cache__={}, **k):
                 args = list(v) + list(k.values())
-                targ_info, muts, rarg_I, rargs = [], [], [], []
+                targ_info, targs, muts, rarg_I, rargs = [], [], [], [], []
                 for i, arg in enumerate(args):
                     if type(arg) is Live:
                         arg._check_active()
                         muts += arg.box.muts
-                        targ_info.append((i, len(arg.box.muts), arg.node, arg.box.meta))
+                        targ_info.append((i, len(arg.box.muts)))
+                        # Pass vanilla fields as pytree inputs so their values are not captured constants.
+                        targs.append((arg.node, arg.box.meta))
                     else:
                         rarg_I.append(i)
                         rargs.append(arg)
-                cache_key = tuple((id(tin), id(meta)) for _, _, tin, meta in targ_info)
-                if __cache__[0] is None or __cache__[0][0] != cache_key:
-                    targ_info = [(i, N_mut, *copy.deepcopy((tin, meta))) for i, N_mut, tin, meta in targ_info]
+                # Cache the calling layout; JAX caches pytree structure, static fields, shapes, and dtypes.
+                cache_key = (tuple(targ_info), tuple(rarg_I), tuple(k), len(v), mode)
+                if cache_key not in __cache__:
                     # @jax.jit
-                    def jinner(muts, *rargs, mode=mode, N_args=len(args), rarg_I=rarg_I, keys=k.keys(), Nv=len(v)):
+                    def jinner(muts, *rargs, targs, mode=mode, N_args=len(args), rarg_I=rarg_I, keys=k.keys(), Nv=len(v)):
                         args = [None]*N_args
                         ptr_mut = 0
-                        for i, N_mut, tin, meta in targ_info:
+                        for (i, N_mut), (tin, meta) in zip(targ_info, targs):
                             args[i] = Live(tin, Box(muts[ptr_mut:ptr_mut+N_mut], meta))
                             ptr_mut += N_mut
                         for i, rarg in zip(rarg_I, rargs):
@@ -98,19 +100,18 @@ def jit(func=None, *, mode=''):
                         # else:
                             
                     if mode=='vng':
-                        __cache__[0] = jax.jit(jax.value_and_grad(jinner, argnums=1)) # TODO: user specified nums
+                        __cache__[cache_key] = jax.jit(jax.value_and_grad(jinner, argnums=1)) # TODO: user specified nums
                     elif mode=='grad':
-                        __cache__[0] = jax.jit(jax.grad(jinner, argnums=1)) # TODO: user specified nums
+                        __cache__[cache_key] = jax.jit(jax.grad(jinner, argnums=1)) # TODO: user specified nums
                     else:
-                        __cache__[0] = jax.jit(jinner)
+                        __cache__[cache_key] = jax.jit(jinner)
                 
-                    __cache__[0] = (cache_key, __cache__[0])
 
-                jinner = __cache__[0][1]
+                jinner = __cache__[cache_key]
                 # if vng:
                 if mode == '':
                     # print('regular eval')
-                    muts, outputs = jinner(muts, *rargs)
+                    muts, outputs = jinner(muts, *rargs, targs=targs)
 
                     if type(outputs) is Frozen:
                         outputs = outputs.live()
@@ -122,15 +123,15 @@ def jit(func=None, *, mode=''):
                         outputs = tuple(outputs)
 
                     ptr_mut = 0
-                    for i, N_mut, tin, meta in targ_info:
+                    for i, N_mut in targ_info:
                         args[i].box.muts = muts[ptr_mut:ptr_mut+N_mut]
                         ptr_mut += N_mut
 
                     return outputs
                 else:
-                    # a,b = jinner(muts, *rargs)
-                    # print('vng eval', jinner(muts, *rargs))# a, b)
-                    return jinner(muts, *rargs)
+                    # a,b = jinner(muts, *rargs, targs=targs)
+                    # print('vng eval', jinner(muts, *rargs, targs=targs))# a, b)
+                    return jinner(muts, *rargs, targs=targs)
                    
             return outer
 
@@ -177,11 +178,12 @@ def tclass(cls=None, *, static_attrnames=[]):
 class Mutable:
     """Specification for property that can be modified in place via Live"""
 
-    def __init__(self, default=None, shape=(), labels=None):
+    def __init__(self, default=None, shape=(), labels=None, dtype=float):
         """
         Args:
           default: recommended default when instantiating (e.g. used in func:fill but not func:zeros),
             should be broadcastable to arg:shape, must be broadcastable to arg:shape with z batch shape prepended
+          dtype: storage dtype for this mutable, defaults to float; use int or bool for native values
         """
         if labels == None: labels = []
         
@@ -190,6 +192,7 @@ class Mutable:
             shape = (shape,)
         self.shape = shape
         self.labels = labels
+        self.dtype = jax.dtypes.canonicalize_dtype(dtype)
 
 # Dynamic and Derivative fields in a dsp_class are automatically turned into a DynamicsMap during build_z and store indices to the dynamic map
 # @partial(jax.tree_util.register_dataclass, data_fields=['i'], meta_fields=[])
@@ -203,13 +206,14 @@ class MutableID:
     def __hash__(self): return hash((self.__class__, self.i))
 
 # TODO: only labeled_mut_ids is needed during runtime... and MutableID needs to be static to use as index the way i do
-@partial(jax.tree_util.register_dataclass, data_fields=['labeled_mut_ids', 'defaults'], meta_fields=['mut_shapes'])
+@partial(jax.tree_util.register_dataclass, data_fields=['labeled_mut_ids', 'defaults'], meta_fields=['mut_shapes', 'mut_dtypes'])
 @dataclass
 class Meta:
     # batch_shape:     tuple[int]
     mut_shapes:      list[tuple[int]]               = field(default_factory=lambda:[]) #: base shape of each mutable
     labeled_mut_ids: dict[str, list[MutableID]]     = field(default_factory=lambda:{}) #: for each label, a list of identifiers
     defaults:        dict[MutableID, jtp.ArrayLike] = field(default_factory=lambda:{}) #: index arrays into underlying array to a broadcastable default
+    mut_dtypes:      list[np.dtype]                = field(default_factory=lambda:[]) #: storage dtype of each mutable
     #run: RuntimeMeta
 
     def append(self, mut: Mutable, default: jtp.ArrayLike) -> MutableID:
@@ -222,6 +226,7 @@ class Meta:
         """
         mid = MutableID(len(self.mut_shapes))
         self.mut_shapes.append(mut.shape)
+        self.mut_dtypes.append(mut.dtype)
         mut.labels = list(set(mut.labels)) # Remove duplicates
         for label in mut.labels:
             required_idx = None
@@ -256,7 +261,7 @@ class Meta:
         """
         # print('new muts', batch_shape, self.mut_shapes)
         # print(batch_shape+self.mut_shapes[0], )
-        muts = [jnp.zeros(batch_shape+shape) for shape in self.mut_shapes]
+        muts = [jnp.zeros(batch_shape+shape, dtype=dtype) for shape, dtype in zip(self.mut_shapes, self.mut_dtypes)]
         # print(muts[0].shape)
         for i, default in self.defaults.items():
             # muts[mid.i] = muts[mid.i].at[...].set(default)
@@ -430,8 +435,12 @@ class Live:
             replace_child(self, name, value)
         elif is_dataclass(type(value)) and getattr(value, '__is_baked__', False):
             raise ValueError('Assign the Live child, not .node; .node does not carry mutable metadata')
+        elif isinstance(value, Live) or any(type(mid) is MutableID for mid in tree_nodes(leaf)) or any(type(mid) is MutableID for mid in tree_nodes(value)):
+            raise ValueError('Replace children containing mutable state with a Live child')
         else:
-            raise ValueError('{} isn\'t mutable; all mutable states must be stored as a MutableID (generated from a Mutable)'.format(name))
+            if not jax.core.trace_ctx.is_top_level():
+                raise ValueError('Plain attribute assignment is only supported outside JAX tracing')
+            setattr(self.node, name, value)
 
     def __getitem__(self, idx):
         self._check_active()
@@ -544,7 +553,8 @@ def select_meta(meta, mut_ids):
         if any(mid is not None and mid.i in mapping for mid in mids):
             labels[label] = [None if mid is None else mapping[mid.i] for mid in mids if mid is None or mid.i in mapping]
     return Meta([meta.mut_shapes[i] for i in mut_ids], labels,
-                {mapping[i].i: value for i, value in meta.defaults.items() if i in mapping})
+                {mapping[i].i: value for i, value in meta.defaults.items() if i in mapping},
+                [meta.mut_dtypes[i] for i in mut_ids])
 
 
 def copy_branch(node, meta):
@@ -582,6 +592,7 @@ def bake_child(node, meta):
         mid_offset = len(meta.mut_shapes)
         increment_tree(sub_branch, mid_offset, len(sub_meta.mut_shapes))
         meta.mut_shapes += sub_meta.mut_shapes
+        meta.mut_dtypes += sub_meta.mut_dtypes
         for label, mids in sub_meta.labeled_mut_ids.items():
             meta.labeled_mut_ids[label] = meta.labeled_mut_ids.get(label, []) + [None if mid is None else MutableID(mid.i+mid_offset) for mid in mids]
         meta.defaults.update({i+mid_offset: value for i, value in sub_meta.defaults.items()})
@@ -620,6 +631,7 @@ def replace_child(parent, name, child):
     mid_offset = len(keep_ids)
     increment_tree(node, mid_offset, len(sub_meta.mut_shapes))
     meta.mut_shapes += sub_meta.mut_shapes
+    meta.mut_dtypes += sub_meta.mut_dtypes
     for label, mids in sub_meta.labeled_mut_ids.items():
         meta.labeled_mut_ids[label] = meta.labeled_mut_ids.get(label, []) + [None if mid is None else MutableID(mid.i+mid_offset) for mid in mids]
     meta.defaults.update({i+mid_offset: value for i, value in sub_meta.defaults.items()})
@@ -678,6 +690,7 @@ def bake_branch(branch, meta):
             # Sub_meta has already baked the grandchildren and they are flattened in mut_shapes and defaults but we need to recursively adjust the mids
             increment_tree(sub_branch, mid_offset, len(sub_meta.mut_shapes))
             meta.mut_shapes += sub_meta.mut_shapes
+            meta.mut_dtypes += sub_meta.mut_dtypes
             # Note that the mids in sub_meta are references so the offset modified above is carried over
             for label, mut_ids in sub_meta.labeled_mut_ids.items():
                 meta.labeled_mut_ids[label] = meta.labeled_mut_ids.get(label, []) + [None if mid is None else MutableID(mid.i+mid_offset) for mid in mut_ids]

@@ -45,9 +45,249 @@ class Collection(metaclass=Tracept):
     children: object = None
 
 
+class TypedChild(metaclass=Tracept):
+    count: Mutable(default=2, dtype=int, labels=['counts']) = None
+    flags: Mutable(default=True, shape=(2,), dtype=bool, labels=['flags']) = None
+    empty: Mutable(shape=(2,), dtype=int) = None
+    value: Mutable(default=1) = None
+
+
 class TestCore(unittest.TestCase):
     def assertArrayEqual(self, actual, expected):
         np.testing.assert_array_equal(actual, expected)
+
+    def test_mutable_dtypes_and_batched_assignment(self):
+        child = TypedChild.new(batch_shape=3)
+        self.assertEqual(child.count.dtype, jnp.asarray(0).dtype)
+        self.assertEqual(child.flags.dtype, jnp.bool_)
+        self.assertEqual(child.value.dtype, jnp.asarray(0.).dtype)
+        self.assertArrayEqual(child.count, [2, 2, 2])
+        self.assertArrayEqual(child.flags, np.ones((3, 2), dtype=bool))
+        self.assertArrayEqual(child.empty, np.zeros((3, 2), dtype=int))
+        child[1].count = 7
+        child[0]['flags', 0] = [False, True]
+        self.assertArrayEqual(child.count, [2, 7, 2])
+        self.assertArrayEqual(child.flags[0], [False, True])
+
+    def test_mutable_dtypes_survive_jit(self):
+        @jit
+        def update(child):
+            child.count += 1
+            child.flags = ~child.flags
+            return child.count, child.flags
+
+        child = TypedChild.new()
+        for expected in [3, 4]:
+            count, flags = update(child)
+            self.assertEqual(count.dtype, jnp.asarray(0).dtype)
+            self.assertEqual(flags.dtype, jnp.bool_)
+            self.assertArrayEqual(count, expected)
+            self.assertArrayEqual(flags, [expected == 4]*2)
+
+    def test_mutable_dtype_metadata_survives_child_lifecycle(self):
+        child = TypedChild.new()
+        parent = EmptyParent.new(child=child)
+        collection = Collection.new(children=[child])
+        parent.child.count = 9
+        parent.child.flags = [False, True]
+        parent.child = copy.copy(parent.child)
+        for restored in [parent.child, parent.child.frozen().live(),
+                         copy.copy(parent.child), collection.children[0]]:
+            self.assertEqual(restored.count.dtype, jnp.asarray(0).dtype)
+            self.assertEqual(restored.flags.dtype, jnp.bool_)
+            fresh = fresh_like(restored, batch_shape=2)
+            self.assertEqual(fresh.count.dtype, restored.count.dtype)
+            self.assertEqual(fresh.flags.dtype, restored.flags.dtype)
+            self.assertArrayEqual(fresh.count, [2, 2])
+            self.assertArrayEqual(fresh.flags, np.ones((2, 2), dtype=bool))
+
+    def test_plain_attributes_can_be_modified_outside_jit(self):
+        child = StaticChild.new()
+        frozen = child.frozen()
+        copied = copy.copy(child)
+        child.value += 1
+        self.assertEqual(child.value, 8)
+        self.assertEqual(child.node.value, 8)
+        self.assertEqual(frozen.live().value, 7)
+        self.assertEqual(copied.value, 7)
+        self.assertEqual(len(child.box.muts), 0)
+
+        parent = EmptyParent.new(child=child, batch_shape=3)
+        view = parent.child
+        parent[0].child.value = 9
+        self.assertEqual(view.value, 9)
+        self.assertEqual(parent[1].child.value, 9)
+        self.assertEqual(child.value, 8)
+
+    def test_plain_attribute_assignment_reuses_jit(self):
+        traces = []
+
+        @jit
+        def read(child):
+            traces.append(None)
+            return child.value
+
+        child = StaticChild.new()
+        self.assertArrayEqual(read(child), 7)
+        self.assertArrayEqual(read(child), 7)
+        child.value = 10
+        self.assertArrayEqual(read(child), 10)
+        self.assertArrayEqual(read(child), 10)
+        other = StaticChild.new(value=11)
+        self.assertArrayEqual(read(other), 11)
+        self.assertEqual(len(traces), 1)
+
+    def test_nested_static_attribute_assignment_retraces_jit(self):
+        traces = []
+
+        @jit
+        def update(parent):
+            traces.append(parent.child.scale)
+            parent.child.x += parent.child.scale
+            return parent.child.x
+
+        parent = Parent.new()
+        self.assertArrayEqual(update(parent), 5)
+        parent.child.scale = 10
+        self.assertArrayEqual(update(parent), 15)
+        self.assertArrayEqual(update(parent), 25)
+        self.assertEqual(traces, [3, 10])
+        parent.child.scale = 3
+        self.assertArrayEqual(update(parent), 28)
+        self.assertEqual(traces, [3, 10])
+
+    def test_nested_plain_attribute_assignment_reuses_jit(self):
+        traces = []
+
+        @jit
+        def read(parent):
+            traces.append(None)
+            return parent.child.value, parent.child
+
+        parent = EmptyParent.new(child=StaticChild.new())
+        value, child = read(parent)
+        self.assertArrayEqual(value, 7)
+        self.assertArrayEqual(child.value, 7)
+        parent.child.value = 10
+        value, child = read(parent)
+        self.assertArrayEqual(value, 10)
+        self.assertArrayEqual(child.value, 10)
+        self.assertEqual(len(traces), 1)
+
+    def test_plain_attribute_shape_and_dtype_changes_retrace_jit(self):
+        traces = []
+
+        @jit
+        def read(child):
+            traces.append(None)
+            return child.value * 2
+
+        child = StaticChild.new(value=jnp.ones(2, dtype=jnp.float32))
+        self.assertArrayEqual(read(child), [2, 2])
+        child.value = jnp.full((2,), 3, dtype=jnp.float32)
+        self.assertArrayEqual(read(child), [6, 6])
+        self.assertEqual(len(traces), 1)
+        child.value = jnp.ones(3, dtype=jnp.float32)
+        self.assertArrayEqual(read(child), [2, 2, 2])
+        self.assertEqual(len(traces), 2)
+        child.value = jnp.ones(3, dtype=jnp.int32)
+        self.assertArrayEqual(read(child), [2, 2, 2])
+        self.assertEqual(len(traces), 3)
+
+    def test_child_structure_changes_retrace_and_reuse_jit(self):
+        traces = []
+
+        @jit
+        def read(parent):
+            traces.append(type(parent.child.node))
+            return parent.child.x
+
+        parent = EmptyParent.new(child=Child.new())
+        self.assertArrayEqual(read(parent), 2)
+        parent.child = Child.new()
+        self.assertArrayEqual(read(parent), 2)
+        self.assertEqual(traces, [Child])
+        parent.child = VectorChild.new()
+        self.assertArrayEqual(read(parent), [4, 4])
+        self.assertEqual(traces, [Child, VectorChild])
+        parent.child = Child.new()
+        self.assertArrayEqual(read(parent), 2)
+        self.assertEqual(traces, [Child, VectorChild])
+
+    def test_plain_attribute_changes_reuse_gradient_modes(self):
+        for mode in ('grad', 'vng'):
+            with self.subTest(mode=mode):
+                traces = []
+
+                @jit(mode=mode)
+                def evaluate(child, x):
+                    traces.append(None)
+                    return child.value * x**2
+
+                child = StaticChild.new()
+                result = evaluate(child, 2.)
+                if mode == 'vng':
+                    self.assertArrayEqual(result[0], 28)
+                    result = result[1]
+                self.assertArrayEqual(result, 28)
+                child.value = 10
+                result = evaluate(child, 2.)
+                if mode == 'vng':
+                    self.assertArrayEqual(result[0], 40)
+                    result = result[1]
+                self.assertArrayEqual(result, 40)
+                self.assertEqual(len(traces), 1)
+
+    def test_plain_attributes_work_with_multiple_live_keyword_arguments(self):
+        traces = []
+
+        @jit
+        def update(parent, child, offset):
+            traces.append(None)
+            parent.x += child.value + offset
+            return parent.x
+
+        parent, child = Parent.new(), StaticChild.new()
+        self.assertArrayEqual(update(parent, child=child, offset=2), 10)
+        child.value = 10
+        self.assertArrayEqual(update(parent, child=child, offset=3), 23)
+        self.assertEqual(len(traces), 1)
+
+    def test_plain_attribute_assignment_is_rejected_during_tracing(self):
+        child = StaticChild.new()
+
+        @jit
+        def update(child):
+            child.value = 8
+
+        @jax.jit
+        def native(frozen):
+            live = frozen.live()
+            live.value = 8
+            return live.frozen()
+
+        def captured(x):
+            child.value = 8
+            return x
+
+        with self.assertRaisesRegex(ValueError, 'outside JAX tracing'):
+            update(child)
+        with self.assertRaisesRegex(ValueError, 'outside JAX tracing'):
+            native(child.frozen())
+        with self.assertRaisesRegex(ValueError, 'outside JAX tracing'):
+            jax.grad(captured)(1.)
+        with self.assertRaisesRegex(ValueError, 'outside JAX tracing'):
+            jax.vmap(captured)(jnp.ones(2))
+        self.assertEqual(child.value, 7)
+
+    def test_plain_assignment_cannot_discard_mutable_child_storage(self):
+        parent = Parent.new()
+        with self.assertRaisesRegex(ValueError, 'Live child'):
+            parent.child = None
+        with self.assertRaisesRegex(ValueError, 'Live child'):
+            parent.child.scale = parent.child.node.x
+        self.assertArrayEqual(parent.child.x, 2)
+        self.assertEqual(parent.child.scale, 3)
 
     def test_fresh_child_has_local_metadata_and_defaults(self):
         parent = Parent.new()
