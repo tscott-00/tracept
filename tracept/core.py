@@ -187,7 +187,8 @@ class Mutable:
             shape = (shape,)
         self.shape = shape
         self.labels = labels
-        self.dtype = jax.dtypes.canonicalize_dtype(dtype)
+        # Resolve JAX precision when baking, since annotations may precede config changes.
+        self.dtype = np.dtype(dtype)
 
 # Dynamic and Derivative fields in a dsp_class are automatically turned into a DynamicsMap during build_z and store indices to the dynamic map
 # @partial(jax.tree_util.register_dataclass, data_fields=['i'], meta_fields=[])
@@ -221,7 +222,7 @@ class Meta:
         """
         mid = MutableID(len(self.mut_shapes))
         self.mut_shapes.append(mut.shape)
-        self.mut_dtypes.append(mut.dtype)
+        self.mut_dtypes.append(jax.dtypes.canonicalize_dtype(mut.dtype))
         mut.labels = list(set(mut.labels)) # Remove duplicates
         for label in mut.labels:
             required_idx = None
