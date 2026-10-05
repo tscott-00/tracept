@@ -17,6 +17,9 @@ from jax._src.core import trace_state_clean
 import jax.numpy as jnp
 import jax.typing as jtp
 
+# TODO: find any pitfalls that a common user may try to use the API and encounter bizarre behavior or errors
+# TODO: feasability of something like "with tracept.if():"... turning enclosed code into a jax cond?
+
 class Tracept(type):
     def __new__(cls, name, bases, dct, **kwargs):
         return tclass(super().__new__(cls, name, bases, dct), static_attrnames=kwargs.pop('static_attrnames', []))
@@ -267,12 +270,8 @@ class Meta:
         Returns:
             muts The arrays to store mutable data
         """
-        # print('new muts', batch_shape, self.mut_shapes)
-        # print(batch_shape+self.mut_shapes[0], )
         muts = [jnp.zeros(batch_shape+shape, dtype=dtype) for shape, dtype in zip(self.mut_shapes, self.mut_dtypes)]
-        # print(muts[0].shape)
         for i, default in self.defaults.items():
-            # muts[mid.i] = muts[mid.i].at[...].set(default)
             muts[i] = muts[i].at[...].set(default)
 
         return muts
@@ -354,30 +353,6 @@ class Live:
                 return self.node.__iter__()
             return self.Iterator(self, self.node.__iter__())
 
-    # class Array:
-    #     # i_pre = 
-    #     # z_box = 
-
-    #     def __init__(self, z_box, i_pre = None):
-    #         self.z_box = z_box
-    #         self.i_pre = i_pre
-
-    #     def __getitem__(self, idx):
-    #         return self.z_box.getz(idx, self.i_pre)
-
-    #     def __setitem__(self, idx, value):
-    #         self.z_box.setz(idx, value, self.i_pre)
-
-    #     def __neg__(self): return self[...]._neg(self)
-    #     def __add__(self, other): return self.aval._add(self, other)
-    #     def __radd__(self, other): return self.aval._radd(self, other)
-    #     def __mul__(self, other): return self.aval._mul(self, other)
-    #     def __rmul__(self, other): return self.aval._rmul(self, other)
-    #     def __gt__(self, other): return self.aval._gt(self, other)
-    #     def __lt__(self, other): return self.aval._lt(self, other)
-    #     def __bool__(self): return self.aval._bool(self)
-    #     def __nonzero__(self): return self.aval._nonzero(self)
-    
     def __init__(self, node, box: Box, idx: tuple = NO_IDX):
         # Use __dict__ when initializing to avoid __setattr__
         self.__dict__['node'] = node
@@ -436,8 +411,6 @@ class Live:
             return lambda *v, _self=self, _f=getattr(type(self.node),name), **k: _f(_self, *v, **k)
         elif is_dataclass(type(value)) or callable(value):
             return Live(value, self.box, idx=self._idx)
-        # elif callable(value):
-        #     return partial(value, tracept_self=self)
         elif type(value) in [list, tuple, dict]:
             return self.Iterable(value, self.box, self._idx)
         else:
@@ -719,10 +692,6 @@ def bake_branch(branch, meta):
             meta.defaults = {**meta.defaults, **{k+mid_offset: v for k, v in sub_meta.defaults.items()}}
         elif type(node) is not MutableID and (is_dataclass(type(node)) or type(node) in [list, tuple, dict]):
             setattr(branch, field.name, bake_child(node, meta))
-        # TODO: allow child lists of muts again
-        # elif type(node) is not MutableID and is_dataclass(type(node)) or type(node) in [list, tuple, dict]:
-        #     # print('BAKING CHILD NODE', type(node))
-        #     bake_branch(node, meta) # TODO: should we? th
 
 def fresh_like(liv, batch_shape=()):
     """Create an independent root or child using its original mutable defaults."""

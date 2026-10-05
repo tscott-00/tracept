@@ -84,11 +84,40 @@ class InterpWrapper:
         elif isinstance(value, jax.Array):
             return reduce(lambda a,b:a+b, [w*value[self.idx][i] for i, w in self.iw])
         elif is_dataclass(type(value)):
-            return Wrapper.LerpWrapper(value, self.box, self.idx, self.iw)
+            return InterpWrapper(value, self.box, self.idx, self.iw)
         elif type(value) in [list, tuple, dict]:
             raise ValueError('Upcoming feature') # TODO: need another? or just test in wrap?
         else:
             raise ValueError(f'Can only interpolate mutables or raw jax.Array, got {type(value)}')
+
+    def __format__(self, spec):
+        fields = get_fields(type(self.node))
+        fields_repr = type(self.node).__name__ + '( '
+        do_mut, do_leaves, do_subclasses = False, False, False
+        for s in spec:
+            match s:
+                case 'm': do_mut = True
+                case 'l': do_leaves = True
+                case 't': do_subclasses = True
+                case _: raise ValueError(f'"{s}" is not a recognized format specifier, use "t" to show Tracept children, "m" to show mutables, and/or "l" to show other leaves')
+
+        for field in fields:
+            value = getattr(self.node, field.name)
+            if type(value) is MutableID:
+                if do_mut:
+                    fields_repr += '{}={}, '.format(field.name, np.array2string(np.asarray(getattr(self, field.name)), max_line_width=1000))
+            elif is_dataclass(type(value)):
+                if do_subclasses:
+                    fields_repr += ('{}={:'+spec+'}, ').format(field.name, InterpWrapper(value, self.box, self.idx, self.iw))
+            elif field.name != '__is_baked__':
+                if do_leaves:
+                    if isinstance(value, jax.Array):
+                        value = getattr(self, field.name)
+                    fields_repr += '{}={}, '.format(field.name, value)
+        return fields_repr + " )"
+
+    def __repr__(self):
+        return self.__format__('mlt')
 
 def interp_class(Xs: jtp.ArrayLike|tuple[jtp.ArrayLike], X: jtp.ArrayLike|tuple[jtp.ArrayLike], twp, interp_mode: str = 'lerp'):
     """On-demand interpolation across the leading dimension(s) of a Tracept object's Mutables via live Tracept object
@@ -114,8 +143,7 @@ class LabelWrapper:
         return self.array[self.inv_labels[label]]
 
     def __format__(self, spec):
-        print(self.inv_labels)
-        return '(' + ', '.join([f'{k}={self.array[i]}' for k,i in self.inv_labels.items()]) + ')'
+        return '(' + ', '.join([f'{k}={self.array[i]:{spec}}' for k,i in self.inv_labels.items()]) + ')'
 
     def __repr__(self):
         return self.__format__('')
