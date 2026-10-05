@@ -4,6 +4,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+try:
+    from jax import enable_x64
+except ImportError:
+    from jax.experimental import enable_x64
+
 from tracept import Tracept, Mutable
 from tracept.odes import Derivative, make_fixed_explicit_integrator, step_fe
 
@@ -33,7 +38,7 @@ class DerivativeTest(unittest.TestCase):
         np.testing.assert_array_equal(result.dx, [-1.0, -1.0])
 
     def test_default_dtype_follows_precision_at_construction(self):
-        with jax.enable_x64(False):
+        with enable_x64(False):
             class LatePrecisionDynamics(metaclass=Tracept):
                 x: Mutable(default=1.0) = None
                 dx: Derivative('x') = None
@@ -46,7 +51,7 @@ class DerivativeTest(unittest.TestCase):
             single = LatePrecisionDynamics.new()
             self.assertEqual(single.x.dtype, np.dtype('float32'))
 
-        with jax.enable_x64(True):
+        with enable_x64(True):
             dynamics = LatePrecisionDynamics.new()
             self.assertEqual(dynamics.x.dtype, np.dtype('float64'))
             self.assertEqual(dynamics.dx.dtype, np.dtype('float64'))
