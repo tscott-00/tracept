@@ -4,6 +4,8 @@ JIT-compile-time utilities for cleaner JAX code, with extra utilities for dynami
 # How it works
 Tracept uses Python metaclasses to process your class into one that can be decomposed automatically into static (any pytree) + mutable parts (typical JAX arrays). The mutable parts can be modified similarly to vanilla Python such as s.x += 1, which would normally be something like s = tree_set(s, 'x', s.x+1). This functionality is only available if using tracept.jit or manually .frozen() before calling a jit function then .live() after entering.
 
+Static variables can still be modified outside of jit functions and typical pytree objects are subject to the usual JAX recompilation behavior. Members that are also using the Tracept metaclass are subject to more nuanced behavior as described in the next section.
+
 # Copying and replacing children
 
 Children such as `parent.child` are views into their parent's mutable storage. Use
