@@ -21,8 +21,7 @@ class Derivative(Mutable):
     def __init__(self, field_name: str, default=None, other_labels=[]):
         super().__init__()
         self.field_name = field_name
-        self.default = default
-        self.labels = ['derivs']+other_labels
+        super().__init__(default=default, labels=['derivs']+other_labels)
 
     # TODO: needs to make sure it gets added to meta in same order!!!
     def __pre_bake__(self, owner, owners_mut_nodes):
@@ -54,6 +53,7 @@ class Derivative(Mutable):
         # print('placing deriv of ', self.field_name, 'at ', state_ptr)
         
         self.shape = corresponding_state.shape
+        self.dtype = corresponding_state.dtype
 
 # Forward Euler scheme
 def step_fe(liv, dt):
