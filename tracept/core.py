@@ -15,13 +15,6 @@ import jax
 import jax.numpy as jnp
 import jax.typing as jtp
 
-# TODO: make clear what limitations on calling are - can wrap inside jit when jitting then remake outside, but is it good to return Live and have JAX pytree it?
-#       issue is can't use the Live we entered with since immutable jax pytree... JIT needs to only see the pieces
-#       #1: jit sees tmethod, takes in jax pytree Live, take appart the jaxed static list into a python list, give mutable version to actual function during compilation
-#       #2: custom jit takes in vanilla twrap, unpacks, passes to jax jitted wrap func that repacks sends to actual f, unpacks and returns out of jit, then it is repacked
-
-# TODO: make @property work on Tracept classes, add to unit tests
-
 class Tracept(type):
     def __new__(cls, name, bases, dct, **kwargs):
         return tclass(super().__new__(cls, name, bases, dct), static_attrnames=kwargs.pop('static_attrnames', []))
@@ -411,6 +404,9 @@ class Live:
 
     def __getattr__(self, name):
         self._check_active()
+        descriptor = getattr(type(self.node), name, None)
+        if isinstance(descriptor, property):
+            return descriptor.__get__(self, type(self.node))
         value = getattr(self.node, name) # Get value or function from actual z object
         if type(value) is MutableID:
             # TODO: to support in place slice assignments, have to wrap in something new
@@ -428,6 +424,10 @@ class Live:
     
     def __setattr__(self, name, value):
         self._check_active()
+        descriptor = getattr(type(self.node), name, None)
+        if isinstance(descriptor, property):
+            descriptor.__set__(self, value)
+            return
         leaf = getattr(self.node, name)
         if type(leaf) is MutableID:
             self.box.set_mut(leaf, value, idx=self.idx)

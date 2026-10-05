@@ -22,6 +22,22 @@ class StaticChild(metaclass=Tracept):
     value: int = 7
 
 
+class PropertyChild(Child):
+    offset: int = 1
+
+    @property
+    def scaled(self):
+        return self.x * self.scale + self.offset
+
+    @scaled.setter
+    def scaled(self, value):
+        self.x = (value - self.offset) / self.scale
+
+    @property
+    def readonly(self):
+        return self.scaled
+
+
 class Parent(metaclass=Tracept):
     x: Mutable(default=1, labels=['states']) = None
     child: Child = None
@@ -55,6 +71,26 @@ class TypedChild(metaclass=Tracept):
 class TestCore(unittest.TestCase):
     def assertArrayEqual(self, actual, expected):
         np.testing.assert_array_equal(actual, expected)
+
+    def test_properties_read_write_and_batch_views(self):
+        child = PropertyChild.new(batch_shape=3)
+        self.assertArrayEqual(child.scaled, [7, 7, 7])
+        child[1].scaled = 13
+        self.assertArrayEqual(child.x, [2, 4, 2])
+        self.assertArrayEqual(child.readonly, [7, 13, 7])
+        with self.assertRaises(AttributeError):
+            child.readonly = 0
+
+    def test_properties_survive_jit_and_child_views(self):
+        @jit
+        def update(parent):
+            parent.child.scaled += 3
+            return parent.child.readonly
+
+        parent = EmptyParent.new(child=PropertyChild.new())
+        for expected in [10, 13]:
+            self.assertArrayEqual(update(parent), expected)
+            self.assertArrayEqual(parent.child.scaled, expected)
 
     def test_mutable_dtypes_and_batched_assignment(self):
         child = TypedChild.new(batch_shape=3)
