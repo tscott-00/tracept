@@ -68,9 +68,82 @@ class TypedChild(metaclass=Tracept):
     value: Mutable(default=1) = None
 
 
+class SuperBase(metaclass=Tracept):
+    x: Mutable(default=2) = None
+
+    def update(self, value):
+        self.x += value
+        return self.x
+
+    @property
+    def scaled(self):
+        return self.x * 2
+
+    def __call__(self, value):
+        return self.update(value)
+
+
+class SuperLeft(SuperBase):
+    offset: int = 1
+
+    def update(self, value):
+        return super().update(value + self.offset)
+
+    @property
+    def scaled(self):
+        return super().scaled + self.offset
+
+    def explicit_update(self, value):
+        return super(SuperLeft, self).update(value)
+
+    def __call__(self, value):
+        return super().__call__(value)
+
+
+class SuperRight(SuperBase):
+    factor: int = 3
+
+    def update(self, value):
+        return super().update(value * self.factor)
+
+
+class SuperDiamond(SuperLeft, SuperRight):
+    marker: int = 0
+
+
 class TestCore(unittest.TestCase):
     def assertArrayEqual(self, actual, expected):
         np.testing.assert_array_equal(actual, expected)
+
+    def test_super_member_functions_and_properties(self):
+        child = SuperLeft.new()
+        self.assertArrayEqual(child.update(3), 6)
+        self.assertArrayEqual(child.x, 6)
+        self.assertArrayEqual(child.scaled, 13)
+        self.assertArrayEqual(child.explicit_update(2), 8)
+        self.assertArrayEqual(child(1), 10)
+
+    def test_super_follows_multiple_inheritance_mro(self):
+        child = SuperDiamond.new()
+        self.assertArrayEqual(child.update(2), 11)
+        self.assertArrayEqual(child.x, 11)
+        self.assertArrayEqual(child.explicit_update(2), 17)
+
+    def test_super_survives_jit_and_indexed_child_views(self):
+        @jit
+        def update(parent, value):
+            parent.child[1].update(value)
+            return parent.child.scaled
+
+        parent = EmptyParent.new(child=SuperDiamond.new(), batch_shape=3)
+        self.assertArrayEqual(parent.child[0].update(1), 8)
+        for value, expected in [(2, [17, 23, 5]), (1, [17, 35, 5])]:
+            self.assertArrayEqual(update(parent, value), expected)
+            self.assertArrayEqual(parent.child.scaled, expected)
+        for child in [copy.copy(parent.child), parent.child.frozen().live()]:
+            self.assertArrayEqual(child[2].update(0), 5)
+            self.assertArrayEqual(child.x, [8, 17, 5])
+        self.assertArrayEqual(parent.child.x, [8, 17, 2])
 
     def test_properties_read_write_and_batch_views(self):
         child = PropertyChild.new(batch_shape=3)

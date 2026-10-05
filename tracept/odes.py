@@ -19,6 +19,7 @@ class Derivative(Mutable):
     """A mutable that represents the derivative of another"""
 
     def __init__(self, field_name: str, default=None, other_labels=[]):
+        super().__init__()
         self.field_name = field_name
         self.default = default
         self.labels = ['derivs']+other_labels

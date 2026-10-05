@@ -187,6 +187,12 @@ class Mutable:
         self.labels = labels
         self.dtype = jax.dtypes.canonicalize_dtype(dtype)
 
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # Caches from before per-mutable dtypes used default floating storage.
+        if "dtype" not in state:
+            self.dtype = jax.dtypes.canonicalize_dtype(float)
+
 # Dynamic and Derivative fields in a dsp_class are automatically turned into a DynamicsMap during build_z and store indices to the dynamic map
 # @partial(jax.tree_util.register_dataclass, data_fields=['i'], meta_fields=[])
 @partial(jax.tree_util.register_dataclass, data_fields=[], meta_fields=['i'])
@@ -208,6 +214,12 @@ class Meta:
     defaults:        dict[MutableID, jtp.ArrayLike] = field(default_factory=lambda:{}) #: index arrays into underlying array to a broadcastable default
     mut_dtypes:      list[np.dtype]                = field(default_factory=lambda:[]) #: storage dtype of each mutable
     #run: RuntimeMeta
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # Restore metadata in old pickles, including metadata in closures.
+        if "mut_dtypes" not in state:
+            self.mut_dtypes = [jax.dtypes.canonicalize_dtype(float)] * len(self.mut_shapes)
 
     def append(self, mut: Mutable, default: jtp.ArrayLike) -> MutableID:
         """
@@ -370,6 +382,12 @@ class Live:
         self.__dict__['_idx'] = idx
         if box.mut_nodes is None:
             box.mut_nodes = list({id(mid): mid for mid in tree_nodes(node) if type(mid) is MutableID}.values())
+
+    @property
+    def __class__(self):
+        # super() uses the proxy's reported class to resolve the node's MRO,
+        # while binding inherited methods and properties to this Live view.
+        return type(self.node)
 
     @property
     def idx(self) -> Ellipsis.__class__|tuple: # TODO: confusing notating since others use just idx to store
