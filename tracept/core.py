@@ -12,6 +12,8 @@ from typing import Any
 
 import numpy as np
 import jax
+# JAX does not expose an all-transform tracing guard through its public API.
+from jax._src.core import trace_state_clean
 import jax.numpy as jnp
 import jax.typing as jtp
 
@@ -438,7 +440,7 @@ class Live:
         elif isinstance(value, Live) or any(type(mid) is MutableID for mid in tree_nodes(leaf)) or any(type(mid) is MutableID for mid in tree_nodes(value)):
             raise ValueError('Replace children containing mutable state with a Live child')
         else:
-            if not jax.core.trace_ctx.is_top_level():
+            if not trace_state_clean():
                 raise ValueError('Plain attribute assignment is only supported outside JAX tracing')
             setattr(self.node, name, value)
 
@@ -613,7 +615,7 @@ def bake_child(node, meta):
 
 def replace_child(parent, name, child):
     """Replace a whole child outside tracing, preserving other state and views."""
-    if not jax.core.trace_ctx.is_top_level():
+    if not trace_state_clean():
         raise ValueError('Child replacement is only supported outside JAX tracing')
     if parent._idx is not NO_IDX:
         raise ValueError('Child replacement requires an unindexed parent')
