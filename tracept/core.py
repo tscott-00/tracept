@@ -4,6 +4,7 @@
 
 import copy
 import inspect
+import weakref
 from functools import partial, reduce
 from dataclasses import dataclass, field, is_dataclass, make_dataclass
 from dataclasses import fields as get_fields
@@ -14,8 +15,7 @@ import jax
 import jax.numpy as jnp
 import jax.typing as jtp
 
-# TODO: via meta, allow int and bool dynamics natively
-# TODO: allow dynamics to be stored individually in the box? then aggregates need to be stacked... unless aggregates stay as list of I then it is natural
+# TODO: via meta, allow int and bool mutables natively (not everything is float), add unit tests
 
 # TODO: make clear what limitations on calling are - can wrap inside jit when jitting then remake outside, but is it good to return Live and have JAX pytree it?
 #       issue is can't use the Live we entered with since immutable jax pytree... JIT needs to only see the pieces
@@ -42,7 +42,7 @@ class Tracept(type):
             if type(batch_shape) is int:
                 batch_shape = (batch_shape,)
 
-            return Live(tin, Box(meta.new_muts(batch_shape), meta))
+            return Live(tin, Box(meta.new_muts(batch_shape), meta, batch_shape=batch_shape))
 
 # TODO: in other file
 def jit(func=None, *, mode=''):
@@ -58,12 +58,15 @@ def jit(func=None, *, mode=''):
                 targ_info, muts, rarg_I, rargs = [], [], [], []
                 for i, arg in enumerate(args):
                     if type(arg) is Live:
+                        arg._check_active()
                         muts += arg.box.muts
-                        targ_info.append((i, len(muts), arg.node, arg.box.meta))
+                        targ_info.append((i, len(arg.box.muts), arg.node, arg.box.meta))
                     else:
                         rarg_I.append(i)
                         rargs.append(arg)
-                if __cache__[0] == None:
+                cache_key = tuple((id(tin), id(meta)) for _, _, tin, meta in targ_info)
+                if __cache__[0] is None or __cache__[0][0] != cache_key:
+                    targ_info = [(i, N_mut, *copy.deepcopy((tin, meta))) for i, N_mut, tin, meta in targ_info]
                     # @jax.jit
                     def jinner(muts, *rargs, mode=mode, N_args=len(args), rarg_I=rarg_I, keys=k.keys(), Nv=len(v)):
                         args = [None]*N_args
@@ -101,7 +104,9 @@ def jit(func=None, *, mode=''):
                     else:
                         __cache__[0] = jax.jit(jinner)
                 
-                jinner = __cache__[0]
+                    __cache__[0] = (cache_key, __cache__[0])
+
+                jinner = __cache__[0][1]
                 # if vng:
                 if mode == '':
                     # print('regular eval')
@@ -267,7 +272,8 @@ class Frozen: # for entering and exiting
     meta: Meta
 
     def live(self):
-        return Live(self.tin, Box(self.muts, self.meta))
+        tin, meta = copy.deepcopy((self.tin, self.meta)) # TODO: no, why???
+        return Live(tin, Box(list(self.muts), meta))
 
 # Shared container to keep track of mutating z_dyn, subclass so it can be used in other Lives easily
 @dataclass
@@ -275,6 +281,8 @@ class Box:
     muts: list[jax.Array]
     meta: Meta
     batch_shape: tuple = None
+    retired_nodes: dict = field(default_factory=weakref.WeakValueDictionary, repr=False)
+    mut_nodes: list = field(default=None, repr=False)
 
     def __post_init__(self):
         if len(self.meta.mut_shapes) > 0: # Leave batch_shape as None if there are no mutables
@@ -359,13 +367,32 @@ class Live:
         self.__dict__['node'] = node
         self.__dict__['box'] = box
         self.__dict__['_idx'] = idx
+        if box.mut_nodes is None:
+            box.mut_nodes = list({id(mid): mid for mid in tree_nodes(node) if type(mid) is MutableID}.values())
 
     @property
     def idx(self) -> Ellipsis.__class__|tuple: # TODO: confusing notating since others use just idx to store
         # Can't store ... in ._idx by default as don't want to prepend ... if user indices directly
         return ... if self._idx is NO_IDX else self._idx
     
+    def _check_active(self):
+        """Replacing child Tracept nodes is allowed but they are tied into a shared metadata so the old one becomes inactive, throw error if user kept a reference and tries to use it."""
+        if id(self.node) in self.box.retired_nodes:
+            raise ValueError('This child view has been replaced; obtain the child from its parent again')
+
+    def __copy__(self):
+        return self.__deepcopy__({})
+
+    def __deepcopy__(self, memo):
+        self._check_active()
+        node, meta, mut_ids = copy_branch(self.node, self.box.meta)
+        muts = [self.box.get_mut(MutableID(i), self.idx) for i in mut_ids]
+        result = Live(node, Box(muts, meta, batch_shape=self.box.batch_shape))
+        memo[id(self)] = result
+        return result
+
     def __call__(self, *v, **k):
+        self._check_active()
         _callable = self.node
         if inspect.isfunction(_callable): # intended for static functions
             return _callable(*v, **k)
@@ -375,6 +402,7 @@ class Live:
             raise ValueError('{} was called but is not a function, tmethod, or callable class'.format(_callable))
 
     def __getattr__(self, name):
+        self._check_active()
         value = getattr(self.node, name) # Get value or function from actual z object
         if type(value) is MutableID:
             # TODO: to support in place slice assignments, have to wrap in something new
@@ -391,13 +419,19 @@ class Live:
             return value
     
     def __setattr__(self, name, value):
+        self._check_active()
         leaf = getattr(self.node, name)
         if type(leaf) is MutableID:
             self.box.set_mut(leaf, value, idx=self.idx)
+        elif isinstance(value, Live) and (leaf is None or is_dataclass(type(leaf))):
+            replace_child(self, name, value)
+        elif is_dataclass(type(value)) and getattr(value, '__is_baked__', False):
+            raise ValueError('Assign the Live child, not .node; .node does not carry mutable metadata')
         else:
             raise ValueError('{} isn\'t mutable; all mutable states must be stored as a MutableID (generated from a Mutable)'.format(name))
 
     def __getitem__(self, idx):
+        self._check_active()
         if type(idx) is not tuple: idx = (idx,)
         if type(idx[0]) is str: # Labeled access
             # if len(idx) != 2 or type(idx[1]) is not int:
@@ -413,6 +447,7 @@ class Live:
             return Live(self.node, self.box, idx=idx)
 
     def __setitem__(self, idx, value):
+        self._check_active()
         if type(idx) is not tuple: idx = (idx,)
         if type(idx[0]) is str: # Labeled access
             # if len(idx) != 2 or type(idx[1]) is not int:
@@ -425,10 +460,12 @@ class Live:
                 self.box.set_mut(mut_ids[idx[1]], value, self.idx)
 
     def ravel_get(self, label):
+        self._check_active()
         mut_ids = self.box.meta.labeled_mut_ids[label]
         return jnp.concatenate([jnp.reshape(self.box.get_mut(mid, self.idx), self.box.batch_shape+(-1,)) for mid in mut_ids], axis=-1)
 
     def ravel_set(self, label, values):
+        self._check_active()
         mut_ids = self.box.meta.labeled_mut_ids[label]
         ptr = 0
         for i, mid in enumerate(mut_ids):
@@ -439,6 +476,7 @@ class Live:
 
     # TODO: repr for tree structure only, dynamic only, and static only, no children ie ...
     def __format__(self, spec):
+        self._check_active()
         fields = get_fields(type(self.node))
         fields_repr = type(self.node).__name__ + '( '
         do_mut, do_leaves, do_subclasses = False, False, False
@@ -466,7 +504,10 @@ class Live:
         return self.__format__('mlt')
     
     def frozen(self):
-        return Frozen(tin=self.node, muts=self.box.muts, meta=self.box.meta)
+        self._check_active()
+        node, meta, mut_ids = copy_branch(self.node, self.box.meta)
+        muts = [self.box.get_mut(MutableID(i), self.idx) for i in mut_ids]
+        return Frozen(tin=node, muts=muts, meta=meta)
 # TODO Deprecate
 Wrapper = Live
 
@@ -480,16 +521,118 @@ def bake_list(node_list, meta):
             raise TypeError('{} not supported'.format(type(node)))
         # Can be static variable, leave it alone
 
+def tree_nodes(tree):
+    if is_dataclass(type(tree)) and type(tree) is not MutableID:
+        yield tree
+        for field in get_fields(tree):
+            yield from tree_nodes(getattr(tree, field.name))
+    elif type(tree) in [list, tuple, dict]:
+        yield tree
+        for node in tree.values() if type(tree) is dict else tree:
+            yield from tree_nodes(node)
+    elif type(tree) is MutableID:
+        yield tree
+
+
+def select_meta(meta, mut_ids):
+    mapping = {i: MutableID(j) for j, i in enumerate(mut_ids)}
+    labels = {}
+    for label, mids in meta.labeled_mut_ids.items():
+        if any(mid is not None and mid.i in mapping for mid in mids):
+            labels[label] = [None if mid is None else mapping[mid.i] for mid in mids if mid is None or mid.i in mapping]
+    return Meta([meta.mut_shapes[i] for i in mut_ids], labels,
+                {mapping[i].i: value for i, value in meta.defaults.items() if i in mapping})
+
+
+def copy_branch(node, meta):
+    """Copy only this branch, with local mutable IDs and metadata."""
+    node = copy.deepcopy(node)
+    mut_ids = sorted({mid.i for mid in tree_nodes(node) if type(mid) is MutableID})
+    if any(i < 0 or i >= len(meta.mut_shapes) for i in mut_ids):
+        raise ValueError('Child mutable IDs do not belong to its metadata; use a Live child instead of .node')
+    sub_meta = copy.deepcopy(select_meta(meta, mut_ids))
+    mapping = {i: j for j, i in enumerate(mut_ids)}
+    seen = set()
+    for mid in tree_nodes(node):
+        if type(mid) is MutableID and id(mid) not in seen:
+            seen.add(id(mid))
+            mid.i = mapping[mid.i]
+    return node, sub_meta, mut_ids
+
+
 def increment_tree(tree, mid_offset, mid_err_thres):
-    for field in get_fields(tree):
-        node = getattr(tree, field.name)
-        if type(node) is MutableID:
-            if node.i > mid_err_thres:
-                # TODO: allow or not? can allow since mut id carries ref but still pitfall as out of JIT the ref could break on copy but still have mut ref
-                raise ValueError(f'Sub branch with attribute "{field.name}" has already been processed, references are not allowed (likely the parent), use a copy')
+    # An already baked child node (not a Live, a child of the node)
+    # TODO: allow or not? can allow since mut id carries ref but still pitfall as out of JIT the ref could break on copy but still have mut ref
+    seen = set()
+    for node in tree_nodes(tree):
+        if type(node) is MutableID and id(node) not in seen:
+            seen.add(id(node))
+            if not 0 <= node.i < mid_err_thres:
+                raise ValueError('Sub branch has already been processed, use a Live child or a copy')
             node.i += mid_offset
-        elif is_dataclass(type(node)) and hasattr(node, '__is_baked__'): # An already baked child node (not a Live, a child of the node)
-            increment_tree(node, mid_offset, mid_err_thres)
+
+
+def bake_child(node, meta):
+    if isinstance(node, Live):
+        node._check_active()
+        sub_branch, sub_meta, _ = copy_branch(node.node, node.box.meta)
+        mid_offset = len(meta.mut_shapes)
+        increment_tree(sub_branch, mid_offset, len(sub_meta.mut_shapes))
+        meta.mut_shapes += sub_meta.mut_shapes
+        for label, mids in sub_meta.labeled_mut_ids.items():
+            meta.labeled_mut_ids[label] = meta.labeled_mut_ids.get(label, []) + [None if mid is None else MutableID(mid.i+mid_offset) for mid in mids]
+        meta.defaults.update({i+mid_offset: value for i, value in sub_meta.defaults.items()})
+        return sub_branch
+    if is_dataclass(type(node)):
+        if getattr(node, '__is_baked__', False) or any(type(mid) is MutableID for mid in tree_nodes(node)):
+            raise ValueError('Use a Live child or Child.new(), not .node; .node does not carry mutable metadata')
+        node = copy.deepcopy(node)
+        bake_branch(node, meta)
+        return node
+    if type(node) in [list, tuple]:
+        nodes = [bake_child(child, meta) for child in node]
+        return tuple(nodes) if type(node) is tuple else nodes
+    if type(node) is dict:
+        return {key: bake_child(child, meta) for key, child in node.items()}
+    return node
+
+
+def replace_child(parent, name, child):
+    """Replace a whole child outside tracing, preserving other state and views."""
+    if not jax.core.trace_ctx.is_top_level():
+        raise ValueError('Child replacement is only supported outside JAX tracing')
+    if parent._idx is not NO_IDX:
+        raise ValueError('Child replacement requires an unindexed parent')
+    child._check_active()
+    node, sub_meta, mut_ids = copy_branch(child.node, child.box.meta)
+    batch_shape = parent.box.batch_shape or ()
+    # Prepare every array before changing the parent, so failed broadcasts are atomic.
+    sub_muts = [jnp.broadcast_to(child.box.get_mut(MutableID(i), child.idx), batch_shape+shape)
+                for i, shape in zip(mut_ids, sub_meta.mut_shapes)]
+    old_node = getattr(parent.node, name)
+    old_ids = {mid.i for mid in tree_nodes(old_node) if type(mid) is MutableID}
+    keep_ids = [i for i in range(len(parent.box.muts)) if i not in old_ids]
+    meta = select_meta(parent.box.meta, keep_ids)
+    muts = [parent.box.muts[i] for i in keep_ids] + sub_muts
+    mid_offset = len(keep_ids)
+    increment_tree(node, mid_offset, len(sub_meta.mut_shapes))
+    meta.mut_shapes += sub_meta.mut_shapes
+    for label, mids in sub_meta.labeled_mut_ids.items():
+        meta.labeled_mut_ids[label] = meta.labeled_mut_ids.get(label, []) + [None if mid is None else MutableID(mid.i+mid_offset) for mid in mids]
+    meta.defaults.update({i+mid_offset: value for i, value in sub_meta.defaults.items()})
+    # Existing IDs outside the replaced subtree remain usable by previously obtained views.
+    mapping = {i: j for j, i in enumerate(keep_ids)}
+    # All adopted branches own their IDs; weak references reject stale views without retaining old trees.
+    retired = {id(old): old for old in tree_nodes(old_node)}
+    parent.box.retired_nodes.update({key: old for key, old in retired.items() if is_dataclass(type(old))})
+    for mid in parent.box.mut_nodes:
+        if mid.i in mapping and id(mid) not in retired:
+            mid.i = mapping[mid.i]
+    setattr(parent.node, name, node)
+    parent.box.meta, parent.box.muts = meta, muts
+    parent.box.batch_shape = batch_shape
+    mut_nodes = [mid for mid in parent.box.mut_nodes if id(mid) not in retired] + [mid for mid in tree_nodes(node) if type(mid) is MutableID]
+    parent.box.mut_nodes = list({id(mid): mid for mid in mut_nodes}.values())
 
 def bake_branch(branch, meta):
     if is_dataclass(type(branch)):
@@ -524,7 +667,8 @@ def bake_branch(branch, meta):
         node = getattr(branch, field.name)
         if isinstance(node, Live):
             # Extract baked sub branch
-            sub_branch, sub_meta = node.node, node.box.meta
+            node._check_active()
+            sub_branch, sub_meta, _ = copy_branch(node.node, node.box.meta)
             setattr(branch, field.name, sub_branch)
             # Append sub branch to our meta by offsetting each sub mid and carrying over defaults
             mid_offset = len(meta.mut_shapes)
@@ -533,16 +677,20 @@ def bake_branch(branch, meta):
             meta.mut_shapes += sub_meta.mut_shapes
             # Note that the mids in sub_meta are references so the offset modified above is carried over
             for label, mut_ids in sub_meta.labeled_mut_ids.items():
-                meta.labeled_mut_ids[label] = meta.labeled_mut_ids.get(label, []) + mut_ids
+                meta.labeled_mut_ids[label] = meta.labeled_mut_ids.get(label, []) + [None if mid is None else MutableID(mid.i+mid_offset) for mid in mut_ids]
             # meta.defaults = {**meta.defaults, **sub_meta.defaults}
             meta.defaults = {**meta.defaults, **{k+mid_offset: v for k, v in sub_meta.defaults.items()}}
+        elif type(node) is not MutableID and (is_dataclass(type(node)) or type(node) in [list, tuple, dict]):
+            setattr(branch, field.name, bake_child(node, meta))
         # TODO: allow child lists of muts again
         # elif type(node) is not MutableID and is_dataclass(type(node)) or type(node) in [list, tuple, dict]:
         #     # print('BAKING CHILD NODE', type(node))
         #     bake_branch(node, meta) # TODO: should we? th
 
 def fresh_like(liv, batch_shape=()):
+    """Create an independent root or child using its original mutable defaults."""
     if type(batch_shape) is not tuple: batch_shape = (batch_shape,)
-    meta = liv.box.meta
-    return Live(liv.node, Box(meta.new_muts(batch_shape), meta))
+    liv._check_active()
+    node, meta, _ = copy_branch(liv.node, liv.box.meta)
+    return Live(node, Box(meta.new_muts(batch_shape), meta, batch_shape=batch_shape))
 
