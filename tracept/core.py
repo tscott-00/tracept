@@ -347,6 +347,9 @@ class Live:
             value = self.node[item]
             return self.wrap(value)
         
+        def __len__(self):
+            return len(self.node)
+
         def __iter__(self):
             # If dict then return standard key iterator
             if type(self.node) == dict:

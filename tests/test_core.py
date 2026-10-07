@@ -112,6 +112,35 @@ class SuperDiamond(SuperLeft, SuperRight):
 
 
 class TestCore(unittest.TestCase):
+    def test_collection_length_and_truthiness(self):
+        for children in ([Child.new(), Child.new()],
+                         (Child.new(), Child.new()),
+                         {'first': Child.new(), 'second': Child.new()}):
+            with self.subTest(container=type(children)):
+                collection = Collection(children=children)
+                self.assertEqual(len(collection.children), 2)
+                self.assertTrue(collection.children)
+                self.assertEqual(len(list(collection.children)), 2)
+        for children in ([], (), {}):
+            with self.subTest(container=type(children)):
+                collection = Collection(children=children)
+                self.assertEqual(len(collection.children), 0)
+                self.assertFalse(collection.children)
+
+    def test_collection_length_inside_jit_preserves_live_children(self):
+        @jax.jit
+        def update(frozen):
+            collection = frozen.live()
+            for i in range(len(collection.children)):
+                collection.children[i].x += i + 1
+            return collection.frozen()
+
+        collection = Collection(children=[Child.new(), Child.new()])
+        result = update(collection.frozen()).live()
+        self.assertEqual(len(result.children), 2)
+        self.assertArrayEqual(result.children[0].x, 3)
+        self.assertArrayEqual(result.children[1].x, 4)
+
     def assertArrayEqual(self, actual, expected):
         np.testing.assert_array_equal(actual, expected)
 
